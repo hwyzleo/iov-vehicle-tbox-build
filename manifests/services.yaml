@@ -2,6 +2,7 @@
 # Built-in minimal example services (CR-001) plus the framework library
 # entry (CR-002). Dependency fields use the explicit service_dependencies
 # / target_dependencies split; install_components use {name, staging}.
+# PROV service entry added by TBOX-PROV-DSN-CR-009.
 
 services:
   tbox-hello-lib:
@@ -69,3 +70,34 @@ services:
         - yaml-cpp
     runtime:
       systemd_units: []
+
+  prov:
+    description: "TBOX provisioning service (first real service pilot, CR-009)"
+    kind: service
+    source_dir: ../iov-vehicle-tbox-prov
+    build:
+      preset: orin-release
+      targets:
+        - tbox-prov
+        - tbox_prov_client
+      service_dependencies:
+        - framework
+      target_dependencies:
+        - nlohmann-json
+      install_components:
+        - name: prov-sdk
+          staging: sdk
+        - name: prov-runtime
+          staging: rootfs
+    runtime:
+      systemd_units:
+        - tbox-prov.service
+      after: []
+      health_check: tests/smoke/prov-health.sh
+      smoke_test: tests/smoke/prov-ipc.sh
+      config_paths:
+        - /etc/tbox/conf.d
+      persistent_paths:
+        - /var/tbox/prov
+      required_devices: []
+      capabilities: []

@@ -119,9 +119,21 @@ class TestReleaseBuildRejectsPendingSha:
             license="BSD-3-Clause", boundary="TARGET",
             architecture="aarch64", linkage="static",
         )
+        # nlohmann-json (added by CR-009) must be present in the patched
+        # lock so validate_target_dependencies does not short-circuit on a
+        # missing-entry error before the PENDING release guard runs.
+        nlohmann_entry = DependencyEntry(
+            name="nlohmann-json", version="3.11.2", source_url="http://x",
+            source_sha256="d69f9deb6a75e2580465c6c4c5111b89c4dc2fa94e3a85fcd2ffcd9a143d9273",
+            license="MIT", boundary="TARGET",
+            architecture="aarch64", linkage="static",
+        )
         monkeypatch.setattr(
             project, "load_dependency_lock",
-            lambda: DependencyLock(dependencies={"yaml-cpp": pending_entry}),
+            lambda: DependencyLock(dependencies={
+                "yaml-cpp": pending_entry,
+                "nlohmann-json": nlohmann_entry,
+            }),
         )
         config = BuildConfig(platform="orin", profile="release", dry_run=True)
         orch = BuildOrchestrator(project, config)

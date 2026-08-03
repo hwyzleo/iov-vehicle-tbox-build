@@ -46,9 +46,10 @@ class TestEndToEndValidation:
         # 4. Dependency graph
         graph = DependencyGraph(service_manifest)
         order = graph.build_order()
-        assert len(order) == 3
+        assert len(order) == 4
         assert order.index("tbox-hello-lib") < order.index("tbox-hello-cli")
         assert "framework" in order
+        assert "prov" in order
 
         # 5. Release set closure
         rs = release_set_manifest.get("tbox-orin-minimal")

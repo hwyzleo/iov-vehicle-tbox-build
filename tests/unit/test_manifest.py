@@ -44,10 +44,11 @@ class TestLoadYaml:
 class TestServiceManifest:
     def test_load_service_manifest(self, project_root: Path):
         manifest = load_service_manifest(project_root / "manifests" / "services.yaml")
-        assert len(manifest) == 3
+        assert len(manifest) == 4
         assert "tbox-hello-lib" in manifest
         assert "tbox-hello-cli" in manifest
         assert "framework" in manifest
+        assert "prov" in manifest
 
     def test_service_fields(self, project_root: Path):
         manifest = load_service_manifest(project_root / "manifests" / "services.yaml")
@@ -123,7 +124,7 @@ class TestProject:
     def test_project_load_all(self, project_root: Path):
         project = Project(project_root)
         sm = project.load_service_manifest()
-        assert len(sm) == 3
+        assert len(sm) == 4
         pm = project.load_platform_manifest()
         assert pm.platform == "orin"
 

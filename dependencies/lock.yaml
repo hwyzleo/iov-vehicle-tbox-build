@@ -24,6 +24,20 @@ dependencies:
         YAML_CPP_BUILD_TOOLS: "OFF"
         YAML_BUILD_SHARED_LIBS: "OFF"
 
+  nlohmann-json:
+    version: "3.11.2"
+    source:
+      url: "https://github.com/nlohmann/json/archive/refs/tags/v3.11.2.tar.gz"
+      sha256: "d69f9deb6a75e2580465c6c4c5111b89c4dc2fa94e3a85fcd2ffcd9a143d9273"
+    license: MIT
+    boundary: TARGET
+    architecture: aarch64
+    linkage: static
+    patches: []
+    cmake:
+      options:
+        JSON_BuildTests: "OFF"
+
 cache:
   key_components:
     - platform_manifest_digest

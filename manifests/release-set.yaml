@@ -1,6 +1,7 @@
 # TBOX Build Release Set Manifest
 # Built-in minimal release set (CR-001) plus the framework-only release
-# set (CR-002).
+# set (CR-002). Framework + PROV pilot release set added by
+# TBOX-PROV-DSN-CR-009.
 
 release_sets:
   tbox-orin-minimal:
@@ -17,3 +18,11 @@ release_sets:
     profile: release
     services:
       - framework
+
+  tbox-prov-orin:
+    description: "Framework + PROV Orin release set (CR-009 first real service pilot)"
+    platform: orin
+    profile: release
+    services:
+      - framework
+      - prov
