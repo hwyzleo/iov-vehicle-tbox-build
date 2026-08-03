@@ -67,3 +67,16 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+.pytest_cache/
+
+# build output
+out/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# sysroot (imported, read-only, versioned input)
+sysroots/
+graphify-out/
+.idea/

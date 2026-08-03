@@ -1,0 +1,14 @@
+[Unit]
+Description=TBOX Hello Service (BUILD v0.1-alpha minimal example)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/tbox-hello-cli Orin
+Restart=on-failure
+RestartSec=3
+User=tbox
+Group=tbox
+
+[Install]
+WantedBy=multi-user.target

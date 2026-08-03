@@ -1,0 +1,10 @@
+# TBOX Build Release Set Manifest
+# Phase 1 built-in minimal release set for self-verification.
+release_sets:
+  tbox-orin-minimal:
+    description: "Minimal TBOX Orin release set for BUILD v0.1-alpha self-verification"
+    platform: orin
+    profile: release
+    services:
+      - tbox-hello-lib
+      - tbox-hello-cli

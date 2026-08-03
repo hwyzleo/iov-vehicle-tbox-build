@@ -1,0 +1,83 @@
+# JSON Schema (Draft-07) for TBOX Build Service Manifest
+# Validates manifests/services.yaml
+$schema: "http://json-schema.org/draft-07/schema#"
+title: TBOX Build Service Manifest
+type: object
+required:
+  - services
+properties:
+  services:
+    type: object
+    minProperties: 1
+    additionalProperties: false
+    patternProperties:
+      "^[a-z][a-z0-9-]*$":
+        type: object
+        required:
+          - repository
+          - build
+        additionalProperties: false
+        properties:
+          repository:
+            type: string
+            minLength: 1
+          revision:
+            type: string
+          source_dir:
+            type: string
+          description:
+            type: string
+          build:
+            type: object
+            required:
+              - target
+              - preset
+            additionalProperties: false
+            properties:
+              target:
+                type: string
+                minLength: 1
+              dependencies:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+              preset:
+                type: string
+                minLength: 1
+              install_component:
+                type: string
+          runtime:
+            type: object
+            additionalProperties: false
+            properties:
+              systemd_units:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+              after:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+              health_check:
+                type: string
+              smoke_test:
+                type: string
+              config_paths:
+                type: array
+                items:
+                  type: string
+              persistent_paths:
+                type: array
+                items:
+                  type: string
+              required_devices:
+                type: array
+                items:
+                  type: string
+              capabilities:
+                type: array
+                items:
+                  type: string

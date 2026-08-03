@@ -1,0 +1,71 @@
+{
+    "version": 3,
+    "cmakeMinimumRequired": {
+        "major": 3,
+        "minor": 16,
+        "patch": 0
+    },
+    "configurePresets": [
+        {
+            "name": "host-debug",
+            "displayName": "Host Debug (native)",
+            "description": "Native host build for development and unit testing",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build/host-debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
+            }
+        },
+        {
+            "name": "host-release",
+            "displayName": "Host Release (native)",
+            "description": "Native host build for release verification",
+            "generator": "Unix Makefiles",
+            "binaryDir": "${sourceDir}/build/host-release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release"
+            }
+        },
+        {
+            "name": "orin-debug",
+            "displayName": "Orin Debug (aarch64)",
+            "description": "Cross-compile debug build for NVIDIA Orin using orin-aarch64 toolchain",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/orin-debug",
+            "toolchainFile": "$env{TBOX_ROOT}/cmake/toolchains/orin-aarch64.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "CMAKE_INSTALL_PREFIX": "/usr",
+                "TBOX_SYSROOT": "$env{TBOX_ROOT}/sysroots/orin-r35.3.1",
+                "TBOX_ROOT": "$env{TBOX_ROOT}"
+            },
+            "environment": {
+                "TBOX_SYSROOT": "$env{TBOX_ROOT}/sysroots/orin-r35.3.1"
+            }
+        },
+        {
+            "name": "orin-release",
+            "displayName": "Orin Release (aarch64)",
+            "description": "Cross-compile release build for NVIDIA Orin using orin-aarch64 toolchain",
+            "generator": "Ninja",
+            "binaryDir": "${sourceDir}/build/orin-release",
+            "toolchainFile": "$env{TBOX_ROOT}/cmake/toolchains/orin-aarch64.cmake",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "CMAKE_INSTALL_PREFIX": "/usr",
+                "TBOX_SYSROOT": "$env{TBOX_ROOT}/sysroots/orin-r35.3.1",
+                "TBOX_ROOT": "$env{TBOX_ROOT}"
+            },
+            "environment": {
+                "TBOX_SYSROOT": "$env{TBOX_ROOT}/sysroots/orin-r35.3.1"
+            }
+        }
+    ],
+    "buildPresets": [
+        { "name": "host-debug",   "configurePreset": "host-debug" },
+        { "name": "host-release", "configurePreset": "host-release" },
+        { "name": "orin-debug",   "configurePreset": "orin-debug" },
+        { "name": "orin-release", "configurePreset": "orin-release" }
+    ]
+}

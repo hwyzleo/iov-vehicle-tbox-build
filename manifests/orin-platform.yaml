@@ -1,0 +1,167 @@
+# TBOX Build Platform Manifest - NVIDIA Orin
+# Controlled target environment baseline for TBOX Linux aarch64 artifacts.
+# CR: TBOX-BUILD-DSN-CR-001
+# Any TBD item MUST be closed before the first releasable build.
+
+platform: orin
+
+hardware:
+  model: jetson-orin-nano-developer-kit
+  module: p3767-0004
+  carrier: p3768-0000
+  soc: tegra234
+  ai_performance_tops: 20
+  cpu:
+    architecture: armv8.2-a
+    cores: 6
+    model: cortex-a78ae
+    l2_cache_observed: 1.5MiB
+    l3_cache_observed: 2MiB
+    nominal_l3_cache_to_verify: 4MB
+  gpu:
+    architecture: nvidia-ampere
+    cuda_cores: 512
+    tensor_cores: 16
+  memory:
+    type: lpddr5
+    nominal_capacity: 4GB
+    observed_mem_total: 3390200kB
+    observed_swap_total: 5889372kB
+    bus_width: 64bit
+    bandwidth: 34GB/s
+  storage:
+    type: ssd
+    nominal_capacity: 128GB
+    root_device: /dev/nvme0n1p1
+    root_capacity_observed: 117GB
+    root_available_observed: 81GB
+
+architecture: aarch64
+
+os:
+  name: ubuntu
+  version: 20.04.5
+  codename: focal
+  kernel: 5.10.104-tegra
+  systemd: 245
+
+nvidia:
+  jetpack_version: 5.1.1
+  jetpack_meta_package: nvidia-jetpack
+  jetpack_meta_package_installed: false
+  jetpack_meta_package_candidate: 5.1.1-b56
+  apt_repository: https://repo.download.nvidia.com/jetson/common
+  apt_repository_suite: r35.3/main
+  l4t_release: R35.3.1
+  l4t_core: 35.3.1-20230319081403
+  board: t186ref
+
+bsp:
+  vendor: nvidia
+  product: jetson-linux
+  version: 35.3.1
+  gcid: 32827747
+  release_date: 2023-03-19T15:19:21Z
+  eabi: aarch64
+  soc: tegra234
+  module_compatible: p3767-0004
+  carrier_compatible: p3768-0000
+  device_tree_source: tegra234-p3767-0004-p3768-0000-a0.dts
+  packages:
+    bootloader: 35.3.1-20230319081403
+    core: 35.3.1-20230319081403
+    firmware: 35.3.1-20230319081403
+    init: 35.3.1-20230319081403
+    kernel: 5.10.104-tegra-35.3.1-20230319081403
+  bootloader:
+    current_slot: A
+    active_slot: A
+    slot_a_status: normal
+    slot_b_status: normal
+    capsule_update_status: 0
+  original_flash_source: unavailable
+  flash_method: unknown
+  board_config: unknown
+  baseline_source: current-device-snapshot
+  kernel_customized: unknown
+  device_tree_customized: unknown
+  rootfs_customized: unknown
+  secure_boot: unknown
+  provenance_risk_accepted_for_v0_1: true
+
+rootfs:
+  filesystem: ext4
+  source: current-device-snapshot
+  source_device: /dev/nvme0n1p1
+  id: orin-r35.3.1
+  repository_path: sysroots/orin-r35.3.1
+  digest: generated-during-import-verification
+
+abi:
+  glibc: 2.31
+  nptl: 2.31
+  long_bit: 64
+  c_standard: c11
+  cxx_standard: c++17
+  libstdcxx_cxx11_abi: default-gcc9
+
+target_native_tools:
+  gcc: 9.4.0
+  gxx: 9.4.0
+  cmake: 3.16.3
+  make: 4.2.1
+  python: 3.8.10
+  pkg_config: 0.29.1
+  clang: not_found
+  ninja: not_found
+
+toolchain:
+  execution_architecture: linux/arm64
+  target_triple: aarch64-linux-gnu
+  cross_cc: gcc-9
+  cross_cxx: g++-9
+  version: 9.4.x
+  sysroot: orin-r35.3.1
+  exact_package_revision: locked-by-build-image-manifest
+
+runtime:
+  nvpmodel: 10W
+
+build_host_observed:
+  os: macos
+  kernel: darwin-24.6.0
+  architecture: arm64
+  docker: 28.3.3
+  native_tools:
+    compiler: apple-clang-16.0.0
+    cmake: 3.25.2
+    make: 3.81
+    python: 3.12.7
+  disk:
+    total: 926GiB
+    used: 768GiB
+    available: 130GiB
+    utilization: 86%
+
+reproducible_build_environment:
+  container_os: ubuntu-20.04.6-focal
+  container_architecture: linux/arm64
+  observed_architecture: aarch64
+  observed_glibc: 2.31-0ubuntu9.17
+  image: docker.m.daocloud.io/library/ubuntu
+  image_manifest_digest: sha256:722ea796ac2d57eeb3627c58a582fc1acc58be51faf815e1bce1682ae5c092f7
+  validation_status: base-container-runs
+  build_toolchain:
+    gcc: 9.4.x
+    gxx: 9.4.x
+    cmake: 3.16.x
+    ninja: 1.10.x
+    make_fallback: 4.2.x
+    python: 3.8.x
+    pkg_config: 0.29.x
+    binutils: 2.34.x
+    exact_package_revisions: locked-by-build-image-manifest
+  orin_sysroot: orin-r35.3.1
+  orin_sysroot_path: sysroots/orin-r35.3.1
+  ci_runner: native-linux-arm64
+  mac_docker_role: development-validation-only

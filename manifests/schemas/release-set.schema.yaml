@@ -1,0 +1,31 @@
+# JSON Schema (Draft-07) for TBOX Build Release Set Manifest
+# Validates manifests/release-set.yaml
+$schema: "http://json-schema.org/draft-07/schema#"
+title: TBOX Build Release Set Manifest
+type: object
+required:
+  - release_sets
+properties:
+  release_sets:
+    type: object
+    minProperties: 1
+    additionalProperties: false
+    patternProperties:
+      "^[a-z][a-z0-9-]*$":
+        type: object
+        required:
+          - services
+        additionalProperties: false
+        properties:
+          description:
+            type: string
+          platform:
+            type: string
+          profile:
+            type: string
+          services:
+            type: array
+            minItems: 1
+            items:
+              type: string
+              minLength: 1

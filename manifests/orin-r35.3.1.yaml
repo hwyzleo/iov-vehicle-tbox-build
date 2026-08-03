@@ -1,0 +1,28 @@
+sysroot:
+  id: orin-r35.3.1
+  version: r35.3.1
+  source: current-device-snapshot
+  source_device: /dev/nvme0n1p1
+  repository_path: sysroots/orin-r35.3.1
+  digest: c49cfec409f0cc524918aa007ebfffe19b5caebab9168f710e5ac555806f6985
+  file_manifest: sysroots/orin-r35.3.1.manifest.json
+  import_status: verified
+  import_date: '2026-08-03T02:25:47+00:00'
+architecture:
+  elf_class: ELFCLASS64
+  elf_machine: EM_AARCH64
+  long_bit: 64
+key_libraries:
+  glibc: 2.31
+  libstdcxx: 6.0.28
+  gcc: 9.4.0
+  nvidia_driver: to-verify
+  cuda: to-verify
+fixes_applied:
+  absolute_symlinks_rewritten: 84
+  pkgconfig_prefixes_fixed: 0
+  cmake_config_prefixes_fixed: 0
+nvidia_boundary:
+  driver_runtime_libs: []
+  link_time_stub_libs: []
+  notes: NVIDIA driver/runtime vs link-time stub boundaries to be marked during import.

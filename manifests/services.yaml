@@ -1,0 +1,37 @@
+# TBOX Build Service Manifest - Built-in Minimal Example
+# Phase 1 self-verification services. Real framework/PROV entries are
+# added in subsequent phases.
+services:
+  tbox-hello-lib:
+    description: "Minimal C++ shared library for BUILD v0.1-alpha self-verification"
+    repository: examples/minimal
+    build:
+      target: tbox-hello-lib
+      dependencies: []
+      preset: orin-release
+      install_component: tbox-hello-lib-runtime
+    runtime:
+      config_paths: []
+      persistent_paths: []
+
+  tbox-hello-cli:
+    description: "Minimal C++ executable consuming tbox-hello-lib"
+    repository: examples/minimal
+    build:
+      target: tbox-hello-cli
+      dependencies:
+        - tbox-hello-lib
+      preset: orin-release
+      install_component: tbox-hello-cli-runtime
+    runtime:
+      systemd_units:
+        - tbox-hello.service
+      after: []
+      health_check: tests/smoke/hello-health.sh
+      smoke_test: tests/smoke/hello-ipc.sh
+      config_paths:
+        - /etc/tbox/hello
+      persistent_paths:
+        - /var/lib/tbox/hello
+      required_devices: []
+      capabilities: []

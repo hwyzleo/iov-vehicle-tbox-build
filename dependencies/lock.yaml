@@ -1,0 +1,23 @@
+# TBOX Build Dependency Lock File
+# Records versions, sources, licenses and checksums for target dependencies.
+# Phase 1: no external target dependencies (sysroot provides system libs).
+
+dependencies: []
+# Example entry format (for future phases):
+#   - name: protobuf
+#     version: 3.12.4
+#     source: https://github.com/protocolbuffers/protobuf
+#     license: BSD-3-Clause
+#     build_type: static
+#     sha256: ""
+#     build_args: []
+#     patches: []
+
+cache:
+  key_components:
+    - platform_manifest_digest
+    - toolchain_version
+    - sysroot_digest
+    - dependency_versions
+    - build_type
+  directory: dependencies/cache/
