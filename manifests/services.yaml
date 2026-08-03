@@ -1,15 +1,21 @@
-# TBOX Build Service Manifest - Built-in Minimal Example
-# Phase 1 self-verification services. Real framework/PROV entries are
-# added in subsequent phases.
+# TBOX Build Service Manifest
+# Built-in minimal example services (CR-001) plus the framework library
+# entry (CR-002). Dependency fields use the explicit service_dependencies
+# / target_dependencies split; install_components use {name, staging}.
+
 services:
   tbox-hello-lib:
     description: "Minimal C++ shared library for BUILD v0.1-alpha self-verification"
     repository: examples/minimal
     build:
-      target: tbox-hello-lib
-      dependencies: []
+      targets:
+        - tbox-hello-lib
+      service_dependencies: []
+      target_dependencies: []
       preset: orin-release
-      install_component: tbox-hello-lib-runtime
+      install_components:
+        - name: tbox-hello-lib-runtime
+          staging: rootfs
     runtime:
       config_paths: []
       persistent_paths: []
@@ -18,11 +24,15 @@ services:
     description: "Minimal C++ executable consuming tbox-hello-lib"
     repository: examples/minimal
     build:
-      target: tbox-hello-cli
-      dependencies:
+      targets:
+        - tbox-hello-cli
+      service_dependencies:
         - tbox-hello-lib
+      target_dependencies: []
       preset: orin-release
-      install_component: tbox-hello-cli-runtime
+      install_components:
+        - name: tbox-hello-cli-runtime
+          staging: rootfs
     runtime:
       systemd_units:
         - tbox-hello.service
@@ -35,3 +45,27 @@ services:
         - /var/lib/tbox/hello
       required_devices: []
       capabilities: []
+
+  framework:
+    description: "TBOX framework public library (config/store/log/ipc/hash/application)"
+    kind: library
+    source_dir: ../iov-vehicle-tbox-framework
+    build:
+      preset: orin-release
+      targets:
+        - framework-config
+        - framework-store
+        - framework-log
+        - framework-ipc
+        - framework-hash
+        - framework-application
+      install_components:
+        - name: framework-sdk
+          staging: sdk
+        - name: framework-runtime
+          staging: rootfs
+      service_dependencies: []
+      target_dependencies:
+        - yaml-cpp
+    runtime:
+      systemd_units: []

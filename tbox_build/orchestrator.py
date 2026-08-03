@@ -1,13 +1,14 @@
 """Build orchestration for TBOX Build.
 
 Ties together manifest loading, validation, dependency-graph ordering,
-CMake configure/build/install, staging, ELF checking and artifact
+TARGET dependency recipes, CMake configure/build/install (multi-target,
+multi-component with SDK/rootfs staging), ELF checking and artifact
 manifest generation into a single pipeline.
 
 Usage::
 
     orch = BuildOrchestrator(project, platform="orin", profile="release")
-    report = orch.build(set_id="tbox-orin-minimal")
+    report = orch.build(set_id="tbox-framework-orin")
 """
 
 from __future__ import annotations
@@ -23,10 +24,16 @@ from pathlib import Path
 from typing import Any
 
 from .artifact import ArtifactManifest, get_git_commit
-from .elfcheck import check_staging, assert_clean, ElfCheckResult
+from .elfcheck import check_staging, ElfCheckResult
 from .errors import BuildFailure, TboxBuildError
 from .graph import DependencyGraph
-from .manifest import Project, Service, ServiceManifest, ReleaseSetManifest
+from .manifest import (
+    Project,
+    Service,
+    ServiceManifest,
+    ReleaseSetManifest,
+    InstallComponent,
+)
 from .schema import validate_service_manifest, validate_release_set_manifest
 from .staging import StagingDir
 from .validator import validate_all
@@ -46,6 +53,7 @@ class BuildConfig:
     jobs: int = 1
     clean: bool = False
     dry_run: bool = False
+    skip_recipes: bool = False
 
     @property
     def build_type(self) -> str:
@@ -59,6 +67,21 @@ class BuildConfig:
     def generator(self) -> str:
         return "Ninja" if self.is_orin else "Unix Makefiles"
 
+    @property
+    def is_release(self) -> bool:
+        return "release" in self.profile.lower()
+
+
+@dataclass
+class ComponentInstallResult:
+    """Install result for a single install component."""
+
+    name: str
+    staging: str
+    destdir: str
+    status: str = "pending"
+    installed_files: list[str] = field(default_factory=list)
+
 
 @dataclass
 class ServiceResult:
@@ -67,6 +90,8 @@ class ServiceResult:
     id: str
     status: str = "pending"  # pending, success, failed, skipped
     steps: dict[str, str] = field(default_factory=dict)  # step -> status
+    targets: list[str] = field(default_factory=list)
+    components: list[ComponentInstallResult] = field(default_factory=list)
     installed_files: list[str] = field(default_factory=list)
     duration_seconds: float = 0.0
     error: str | None = None
@@ -81,6 +106,7 @@ class BuildReport:
     profile: str = ""
     release_set: str | None = None
     services_requested: list[str] = field(default_factory=list)
+    target_dependencies: list[str] = field(default_factory=list)
     start_time: str = ""
     end_time: str = ""
     duration_seconds: float = 0.0
@@ -120,20 +146,23 @@ class BuildOrchestrator:
 
     def load_and_validate(self) -> tuple[ServiceManifest, ReleaseSetManifest]:
         """Load all manifests and run pre-build validation."""
-        # Load raw YAML for schema validation
         from .manifest import load_yaml
 
         svc_raw = load_yaml(self.project.service_manifest_path)
         rs_raw = load_yaml(self.project.release_set_manifest_path)
+        lock_raw = load_yaml(self.project.dependency_lock_path)
 
         validate_service_manifest(svc_raw, self.project.root)
         validate_release_set_manifest(rs_raw, self.project.root)
+        from .schema import validate_dependency_lock
+        validate_dependency_lock(lock_raw, self.project.root)
 
         service_manifest = self.project.load_service_manifest()
         release_set_manifest = self.project.load_release_set_manifest()
+        lock = self.project.load_dependency_lock()
 
         # Cross-reference and filesystem validations
-        validate_all(service_manifest, self.project.root)
+        validate_all(service_manifest, self.project.root, lock)
 
         return service_manifest, release_set_manifest
 
@@ -166,10 +195,11 @@ class BuildOrchestrator:
         return cmd
 
     def _build_cmd(self, service: Service) -> list[str]:
+        """Build all declared targets in one cmake --build invocation."""
         build_dir = self.staging.service_build_dir(service.id)
         cmd = [
             "cmake", "--build", str(build_dir),
-            "--target", service.build.target,
+            "--target", *service.build.targets,
         ]
         if self.config.generator == "Ninja":
             cmd.extend(["--", f"-j{self.config.jobs}"])
@@ -177,24 +207,41 @@ class BuildOrchestrator:
             cmd.extend(["--", f"-j{self.config.jobs}"])
         return cmd
 
-    def _install_cmd(self, service: Service) -> list[str]:
+    def _install_cmds(self, service: Service) -> list[tuple[InstallComponent, list[str], Path]]:
+        """Return [(component, cmd, destdir)] for each install component."""
         build_dir = self.staging.service_build_dir(service.id)
-        cmd = ["cmake", "--install", str(build_dir)]
-        if service.build.install_component:
-            cmd.extend(["--component", service.build.install_component])
-        return cmd
+        result: list[tuple[InstallComponent, list[str], Path]] = []
+        for component in service.build.install_components:
+            destdir = self.staging.component_destdir(service.id, component.staging)
+            cmd = [
+                "cmake", "--install", str(build_dir),
+                "--prefix", "/usr",
+                "--component", component.name,
+            ]
+            result.append((component, cmd, destdir))
+        return result
 
-    def _cmake_env(self) -> dict[str, str]:
+    def _cmake_env(self, service: Service | None = None) -> dict[str, str]:
         """Return environment variables required by CMake and the toolchain.
 
         TBOX_SYSROOT must be an env var (not just a cache var) so that
         CMake's try_compile sub-processes can still find the sysroot.
+        TBOX_DEP_STAGING points at the TARGET dependency staging prefix.
+        TBOX_SDK_STAGING points at an upstream service SDK staging prefix
+        (empty/absent when building a leaf library like framework).
         """
         env: dict[str, str] = {
             "TBOX_ROOT": str(self.project.root),
         }
         if self.config.is_orin:
             env["TBOX_SYSROOT"] = str(self.project.sysroot_path)
+            env["TBOX_DEP_STAGING"] = str(self.staging.dep_staging)
+        # SDK staging: when a service has service_dependencies, point at the
+        # first dependency's SDK staging (single-SDK v0.1 simplification).
+        if service is not None and service.build.service_dependencies:
+            first_dep = service.build.service_dependencies[0]
+            sdk = self.staging.sdk_dir(first_dep)
+            env["TBOX_SDK_STAGING"] = str(sdk)
         return env
 
     # -- subprocess execution ---------------------------------------------
@@ -245,6 +292,50 @@ class BuildOrchestrator:
             return "failed"
         return "success"
 
+    # -- recipe pre-staging -----------------------------------------------
+
+    def _prepare_target_dependencies(
+        self, graph: DependencyGraph, service_ids: list[str]
+    ) -> list[str]:
+        """Prepare TARGET dependencies (recipes) before services configure.
+
+        Returns the list of prepared dependency names. In dry-run mode the
+        recipes are not executed; in release mode PENDING source checksums
+        are rejected by the recipe executor.
+        """
+        target_deps = sorted(graph.target_dependency_set(service_ids))
+        if not target_deps:
+            return []
+
+        lock = self.project.load_dependency_lock()
+        print(f"=== Preparing TARGET dependencies: {target_deps} ===")
+
+        from .dependency import RecipeExecutor
+
+        executor = RecipeExecutor(
+            project_root=self.project.root,
+            staging=self.staging,
+            lock=lock,
+            config=self.config,
+        )
+        for name in target_deps:
+            entry = lock.get(name)
+            if entry is None:
+                raise BuildFailure(
+                    f"Target dependency '{name}' is not declared in lock.yaml"
+                )
+            if self.config.is_release and not entry.is_source_pinned:
+                raise BuildFailure(
+                    f"Target dependency '{name}' source SHA-256 is not pinned "
+                    f"(marked PENDING); release builds require a filled checksum"
+                )
+            if self.config.dry_run or self.config.skip_recipes:
+                print(f"  [DRY-RUN/SKIP] recipe {name}")
+                continue
+            print(f"  recipe: {name} ({entry.version})")
+            executor.build(name)
+        return target_deps
+
     # -- per-service build ------------------------------------------------
 
     def _build_service(
@@ -254,7 +345,7 @@ class BuildOrchestrator:
         git_commit: str,
     ) -> ServiceResult:
         """Configure, build and install a single service."""
-        result = ServiceResult(id=service.id)
+        result = ServiceResult(id=service.id, targets=list(service.build.targets))
         start = time.time()
         print(f"\n[{service.id}]")
 
@@ -267,7 +358,7 @@ class BuildOrchestrator:
         # 1. Configure
         status = self._run_step(
             self._configure_cmd(service), service, "configure",
-            env=self._cmake_env(),
+            env=self._cmake_env(service),
         )
         result.steps["configure"] = status
         if status == "failed":
@@ -276,10 +367,10 @@ class BuildOrchestrator:
             result.duration_seconds = time.time() - start
             return result
 
-        # 2. Build
+        # 2. Build (all targets)
         status = self._run_step(
             self._build_cmd(service), service, "build",
-            env=self._cmake_env(),
+            env=self._cmake_env(service),
         )
         result.steps["build"] = status
         if status == "failed":
@@ -288,28 +379,55 @@ class BuildOrchestrator:
             result.duration_seconds = time.time() - start
             return result
 
-        # 3. Install (with DESTDIR staging)
-        before = self.staging.snapshot_paths()
-        env = self._cmake_env()
-        env["DESTDIR"] = str(self.staging.install_root)
-        status = self._run_step(
-            self._install_cmd(service), service, "install", env=env
-        )
-        result.steps["install"] = status
-        if status == "failed":
-            result.status = "failed"
-            result.error = f"Install failed, see {self.staging.service_log_file(service.id, 'install')}"
-            result.duration_seconds = time.time() - start
-            return result
+        # 3. Install each component (DESTDIR computed from staging class)
+        base_env = self._cmake_env(service)
+        all_installed: list[str] = []
+        for component, cmd, destdir in self._install_cmds(service):
+            comp_result = ComponentInstallResult(
+                name=component.name,
+                staging=component.staging,
+                destdir=str(destdir),
+            )
+            destdir.mkdir(parents=True, exist_ok=True)
+            before = self._snapshot_under(destdir)
+            env = dict(base_env)
+            env["DESTDIR"] = str(destdir)
+            step_name = f"install:{component.name}"
+            status = self._run_step(cmd, service, step_name, env=env)
+            result.steps[step_name] = status
+            comp_result.status = status
+            if status == "failed":
+                result.status = "failed"
+                result.error = (
+                    f"Install component '{component.name}' failed, see "
+                    f"{self.staging.service_log_file(service.id, step_name)}"
+                )
+                result.components.append(comp_result)
+                result.duration_seconds = time.time() - start
+                return result
+            if not self.config.dry_run:
+                new_files = self._new_files_under(destdir, before)
+                comp_result.installed_files = sorted(new_files)
+                all_installed.extend(new_files)
+            result.components.append(comp_result)
 
-        # Track installed files
-        if not self.config.dry_run:
-            new_files = self.staging.new_files_after_install(before, service.id)
-            result.installed_files = sorted(new_files)
-
+        result.installed_files = sorted(all_installed)
         result.status = "success"
         result.duration_seconds = time.time() - start
         return result
+
+    def _snapshot_under(self, root: Path) -> set[str]:
+        result: set[str] = set()
+        if not root.exists():
+            return result
+        for path in root.rglob("*"):
+            if path.is_file() or path.is_symlink():
+                result.add(str(path.relative_to(root)))
+        return result
+
+    def _new_files_under(self, root: Path, before: set[str]) -> list[str]:
+        after = self._snapshot_under(root)
+        return sorted(after - before)
 
     # -- full pipeline ----------------------------------------------------
 
@@ -339,7 +457,8 @@ class BuildOrchestrator:
                   f"{len(release_set_manifest)} release set(s)")
 
             # 2. Determine build order
-            graph = DependencyGraph(service_manifest)
+            lock = self.project.load_dependency_lock()
+            graph = DependencyGraph(service_manifest, lock)
             if service_id:
                 report.services_requested = [service_id]
                 order = graph.build_order([service_id])
@@ -359,7 +478,12 @@ class BuildOrchestrator:
             self.staging.prepare(clean=self.config.clean)
             print(f"  Staging: {self.staging.root}")
 
-            # 4. Build each service
+            # 4. Prepare TARGET dependencies (recipes) before any configure
+            report.target_dependencies = self._prepare_target_dependencies(
+                graph, report.services_requested
+            )
+
+            # 5. Build each service
             git_commit = get_git_commit(self.project.root)
             for sid in order:
                 service = service_manifest.get(sid)
@@ -375,7 +499,7 @@ class BuildOrchestrator:
                     # Stop on first failure
                     break
 
-            # 5. ELF / pollution check (only if all builds succeeded)
+            # 6. ELF / pollution check (only if all builds succeeded)
             if report.status != "failed" and not self.config.dry_run:
                 print("\n=== ELF / pollution check ===")
                 elf_results = check_staging(self.staging.install_root)
@@ -392,11 +516,11 @@ class BuildOrchestrator:
                     print(f"  {len(elf_results)} file(s) checked, "
                           f"{violations} violation(s), {warnings} warning(s)")
 
-            # 6. Artifact manifest (only if all checks passed)
+            # 7. Artifact manifest (only if all checks passed)
             if report.status != "failed" and not self.config.dry_run:
                 print("\n=== Generating artifact manifest ===")
                 artifact_manifest = self._generate_artifact_manifest(
-                    service_manifest, git_commit, report.service_results
+                    service_manifest, lock, git_commit, report.service_results
                 )
                 manifest_path = self.staging.manifests_dir / "artifact-manifest.json"
                 artifact_manifest.save(manifest_path)
@@ -428,6 +552,7 @@ class BuildOrchestrator:
     def _generate_artifact_manifest(
         self,
         service_manifest: ServiceManifest,
+        lock,
         git_commit: str,
         service_results: list[ServiceResult],
     ) -> ArtifactManifest:
@@ -440,26 +565,37 @@ class BuildOrchestrator:
             profile=self.config.profile,
             platform_manifest=platform_manifest,
             sysroot_manifest=sysroot_manifest,
+            dependency_lock=lock,
         )
 
-        # Build a map of path -> (service_id, target, version)
-        file_owners: dict[str, tuple[str, str, str]] = {}
+        # Build a map of logical rel path -> (service_id, target, version, component, staging)
+        file_owners: dict[str, tuple[str, str, str, str, str]] = {}
         for result in service_results:
+            svc = service_manifest.get(result.id)
+            if svc is None:
+                continue
+            target_str = ",".join(svc.build.targets)
+            comp_by_file: dict[str, ComponentInstallResult] = {}
+            for comp in result.components:
+                for f in comp.installed_files:
+                    comp_by_file[f] = comp
             for path in result.installed_files:
-                svc = service_manifest.get(result.id)
-                if svc:
-                    file_owners[path] = (
-                        result.id,
-                        svc.build.target,
-                        "0.1.0",  # TODO: read from CMake project version
-                    )
+                comp = comp_by_file.get(path)
+                comp_name = comp.name if comp else "unknown"
+                comp_staging = comp.staging if comp else "rootfs"
+                staging_prefix = "sdk/" if comp_staging == "sdk" else "rootfs/"
+                file_owners[staging_prefix + path] = (
+                    result.id, target_str, "0.1.0", comp_name, comp_staging,
+                )
 
         for staged in self.staging.scan_files():
             owner_info = file_owners.get(staged.rel_path)
             if owner_info:
-                svc_id, target, version = owner_info
+                svc_id, target, version, component, staging = owner_info
             else:
-                svc_id, target, version = "unknown", "unknown", "unknown"
+                svc_id, target, version, component, staging = (
+                    "unknown", "unknown", "unknown", "unknown", "unknown",
+                )
             staged.owner_service = svc_id
             manifest.add_staged_file(
                 staged,
@@ -467,6 +603,8 @@ class BuildOrchestrator:
                 owner_target=target,
                 version=version,
                 git_commit=git_commit,
+                install_component=component,
+                staging=staging,
             )
 
         manifest.check_conflicts()

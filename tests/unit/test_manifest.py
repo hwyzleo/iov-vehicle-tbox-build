@@ -44,25 +44,29 @@ class TestLoadYaml:
 class TestServiceManifest:
     def test_load_service_manifest(self, project_root: Path):
         manifest = load_service_manifest(project_root / "manifests" / "services.yaml")
-        assert len(manifest) == 2
+        assert len(manifest) == 3
         assert "tbox-hello-lib" in manifest
         assert "tbox-hello-cli" in manifest
+        assert "framework" in manifest
 
     def test_service_fields(self, project_root: Path):
         manifest = load_service_manifest(project_root / "manifests" / "services.yaml")
         svc = manifest.get("tbox-hello-lib")
         assert svc is not None
         assert svc.repository == "examples/minimal"
-        assert svc.build.target == "tbox-hello-lib"
+        assert svc.build.targets == ["tbox-hello-lib"]
         assert svc.build.preset == "orin-release"
-        assert svc.build.dependencies == []
-        assert svc.build.install_component == "tbox-hello-lib-runtime"
+        assert svc.build.service_dependencies == []
+        assert svc.build.target_dependencies == []
+        assert len(svc.build.install_components) == 1
+        assert svc.build.install_components[0].name == "tbox-hello-lib-runtime"
+        assert svc.build.install_components[0].staging == "rootfs"
 
     def test_service_with_dependency(self, project_root: Path):
         manifest = load_service_manifest(project_root / "manifests" / "services.yaml")
         svc = manifest.get("tbox-hello-cli")
         assert svc is not None
-        assert svc.build.dependencies == ["tbox-hello-lib"]
+        assert svc.build.service_dependencies == ["tbox-hello-lib"]
 
     def test_runtime_config(self, project_root: Path):
         manifest = load_service_manifest(project_root / "manifests" / "services.yaml")
@@ -119,7 +123,7 @@ class TestProject:
     def test_project_load_all(self, project_root: Path):
         project = Project(project_root)
         sm = project.load_service_manifest()
-        assert len(sm) == 2
+        assert len(sm) == 3
         pm = project.load_platform_manifest()
         assert pm.platform == "orin"
 

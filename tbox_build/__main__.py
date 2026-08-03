@@ -84,12 +84,24 @@ def cmd_validate(args: argparse.Namespace) -> int:
         return 1
 
     # Topological sort
-    graph = DependencyGraph(service_manifest)
+    lock = project.load_dependency_lock()
+    graph = DependencyGraph(service_manifest, lock)
     try:
         order = graph.build_order()
         print(f"  [PASS] Topological sort: {' -> '.join(order)}")
     except Exception as exc:
         print(f"  [FAIL] Topological sort: {exc}")
+        return 1
+
+    # Target dependency set
+    try:
+        target_deps = sorted(graph.target_dependency_set())
+        if target_deps:
+            print(f"  [PASS] TARGET dependencies: {target_deps}")
+        else:
+            print(f"  [PASS] TARGET dependencies: (none)")
+    except Exception as exc:
+        print(f"  [FAIL] TARGET dependency resolution: {exc}")
         return 1
 
     # Platform manifest
@@ -259,6 +271,58 @@ def cmd_sysroot(args: argparse.Namespace) -> int:
     return 0 if report.get("status") != "failed" else 1
 
 
+def cmd_deps(args: argparse.Namespace) -> int:
+    """Manage TARGET dependencies (list / build recipes)."""
+    project = _get_project(args)
+    lock = project.load_dependency_lock()
+
+    if args.action == "list":
+        if not lock:
+            print("No dependencies declared in lock.yaml")
+            return 0
+        for dep in lock:
+            pinned = "pinned" if dep.is_source_pinned else "PENDING"
+            print(f"  {dep.name} {dep.version} [{dep.boundary}/{dep.architecture}/"
+                  f"{dep.linkage}] {dep.license} source={pinned}")
+        return 0
+
+    if args.action == "build":
+        if not args.name and not args.all:
+            print("Error: must specify a dependency name or --all")
+            return 1
+        names = sorted(lock.dependency_names()) if args.all else [args.name]
+        from .orchestrator import BuildConfig
+        from .staging import StagingDir
+        from .dependency import RecipeExecutor
+        config = BuildConfig(platform=args.platform, profile=args.profile)
+        staging = StagingDir(project.root, args.platform, args.profile)
+        staging.prepare()
+        executor = RecipeExecutor(project.root, staging, lock, config)
+        failed = []
+        for name in names:
+            entry = lock.get(name)
+            if entry is None:
+                print(f"  [FAIL] {name}: not declared in lock.yaml")
+                failed.append(name)
+                continue
+            if config.is_release and not entry.is_source_pinned:
+                print(f"  [FAIL] {name}: source SHA-256 is PENDING; release build rejected")
+                failed.append(name)
+                continue
+            try:
+                result = executor.build(name)
+                print(f"  [{result.status.upper()}] {name}")
+                if result.status == "failed":
+                    failed.append(name)
+            except Exception as exc:
+                print(f"  [FAIL] {name}: {exc}")
+                failed.append(name)
+        return 1 if failed else 0
+
+    print(f"Unknown deps action: {args.action}")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="tbox_build",
@@ -324,6 +388,16 @@ def main(argv: list[str] | None = None) -> int:
     p_sysroot.add_argument("action", choices=["import", "verify", "fix-symlinks", "manifest"])
     p_sysroot.add_argument("--dry-run", action="store_true")
     p_sysroot.set_defaults(func=cmd_sysroot)
+
+    # deps
+    p_deps = subparsers.add_parser("deps", help="Manage TARGET dependencies (lock/recipes)")
+    _add_common_args(p_deps)
+    p_deps.add_argument("action", choices=["list", "build"])
+    p_deps.add_argument("name", nargs="?", default=None, help="Dependency name")
+    p_deps.add_argument("--all", action="store_true", help="Build all declared dependencies")
+    p_deps.add_argument("--platform", default="orin")
+    p_deps.add_argument("--profile", default="release")
+    p_deps.set_defaults(func=cmd_deps)
 
     args = parser.parse_args(argv)
     return args.func(args)

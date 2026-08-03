@@ -1,5 +1,19 @@
 # JSON Schema (Draft-07) for TBOX Build Service Manifest
 # Validates manifests/services.yaml
+#
+# Field policy (CR-002):
+#   - build.targets[] (plural) is the canonical form; legacy build.target
+#     (singular) is accepted for compatibility. Exactly one of the two
+#     forms must be present; declaring both is a schema failure.
+#   - build.install_components[] is an array of {name, staging} objects.
+#     Legacy build.install_component (singular string) is accepted and
+#     normalized to [{name: <value>, staging: rootfs}]. Both forms must
+#     not be declared together.
+#   - build.service_dependencies[] and build.target_dependencies[] are the
+#     explicit dependency fields. Legacy heterogeneous build.dependencies[]
+#     is accepted for one-time migration only and must not coexist with the
+#     explicit fields.
+#   - kind is optional; defaults to "daemon" when omitted.
 $schema: "http://json-schema.org/draft-07/schema#"
 title: TBOX Build Service Manifest
 type: object
@@ -14,9 +28,13 @@ properties:
       "^[a-z][a-z0-9-]*$":
         type: object
         required:
-          - repository
           - build
         additionalProperties: false
+        anyOf:
+          - required:
+              - repository
+          - required:
+              - source_dir
         properties:
           repository:
             type: string
@@ -27,26 +45,92 @@ properties:
             type: string
           description:
             type: string
+          kind:
+            type: string
+            enum:
+              - library
+              - daemon
+              - service
           build:
             type: object
             required:
-              - target
               - preset
             additionalProperties: false
             properties:
+              preset:
+                type: string
+                minLength: 1
               target:
                 type: string
                 minLength: 1
+              targets:
+                type: array
+                minItems: 1
+                items:
+                  type: string
+                  minLength: 1
+              install_component:
+                type: string
+                minLength: 1
+              install_components:
+                type: array
+                items:
+                  type: object
+                  required:
+                    - name
+                    - staging
+                  additionalProperties: false
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                    staging:
+                      type: string
+                      enum:
+                        - sdk
+                        - rootfs
+              service_dependencies:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+              target_dependencies:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
               dependencies:
                 type: array
                 items:
                   type: string
                   minLength: 1
-              preset:
-                type: string
-                minLength: 1
-              install_component:
-                type: string
+            allOf:
+              # Exactly one of target / targets (at least one required).
+              - oneOf:
+                  - required:
+                      - target
+                    not:
+                      required:
+                        - targets
+                  - required:
+                      - targets
+                    not:
+                      required:
+                        - target
+              # install_component and install_components are mutually exclusive.
+              - not:
+                  required:
+                    - install_component
+                    - install_components
+              # Legacy dependencies must not coexist with explicit dep fields.
+              - not:
+                  required:
+                    - dependencies
+                    - service_dependencies
+              - not:
+                  required:
+                    - dependencies
+                    - target_dependencies
           runtime:
             type: object
             additionalProperties: false

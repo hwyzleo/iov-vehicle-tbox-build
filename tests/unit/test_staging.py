@@ -84,7 +84,7 @@ class TestStagingDir:
 
         files = staging.scan_files()
         assert len(files) == 1
-        assert files[0].rel_path == "usr/bin/app"
+        assert files[0].rel_path == "rootfs/usr/bin/app"
         assert files[0].size == len("binary content")
         assert files[0].sha256 == sha256_file(app_path)
 

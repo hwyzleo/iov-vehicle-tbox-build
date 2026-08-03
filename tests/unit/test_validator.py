@@ -28,9 +28,9 @@ def _make_service(
         id=sid,
         repository=repository,
         build=BuildConfig(
-            target=sid,
             preset="orin-release",
-            dependencies=dependencies or [],
+            targets=[sid],
+            service_dependencies=dependencies or [],
         ),
         runtime=RuntimeConfig(
             systemd_units=systemd_units or [],
@@ -115,7 +115,7 @@ class TestValidateAll:
     def test_validate_all_with_missing_dep(self, tmp_path: Path):
         svc = _make_service("svc-a", dependencies=["nonexistent"])
         manifest = ServiceManifest(services={"svc-a": svc})
-        with pytest.raises(ValidationFailure, match="Missing dependencies"):
+        with pytest.raises(ValidationFailure, match="service_dependencies"):
             validate_all(manifest, tmp_path)
 
     def test_validate_all_with_cycle(self, tmp_path: Path):

@@ -46,8 +46,9 @@ class TestEndToEndValidation:
         # 4. Dependency graph
         graph = DependencyGraph(service_manifest)
         order = graph.build_order()
-        assert len(order) == 2
+        assert len(order) == 3
         assert order.index("tbox-hello-lib") < order.index("tbox-hello-cli")
+        assert "framework" in order
 
         # 5. Release set closure
         rs = release_set_manifest.get("tbox-orin-minimal")
@@ -77,7 +78,8 @@ class TestDryRunBuild:
         for sr in report.service_results:
             assert sr.steps.get("configure") == "skipped"
             assert sr.steps.get("build") == "skipped"
-            assert sr.steps.get("install") == "skipped"
+            install_steps = [v for k, v in sr.steps.items() if k.startswith("install:")]
+            assert install_steps and all(s == "skipped" for s in install_steps)
 
     def test_dry_run_single_service(self, project_root: Path):
         project = Project(project_root)

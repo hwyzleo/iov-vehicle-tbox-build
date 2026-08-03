@@ -72,6 +72,9 @@ Testing/
 # build output
 out/
 
+# dependency recipe cache (downloaded sources, build dirs, markers)
+dependencies/cache/
+
 # Python cache
 __pycache__/
 *.pyc

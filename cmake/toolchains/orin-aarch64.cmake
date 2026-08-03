@@ -55,12 +55,33 @@ endif()
 set(CMAKE_SYSROOT "${_tbox_sysroot}")
 
 # --- Find root path ---
-# Search order: sysroot first, then target dependency staging.
+# Search order (CR-002): downstream SDK staging -> TARGET dependency staging
+# -> sysroot. Each is only prepended when the variable is defined AND
+# non-empty, to avoid an empty value collapsing to "/usr" (host pollution).
 set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}")
-if(DEFINED ENV{TBOX_DEP_STAGING})
-    list(APPEND CMAKE_FIND_ROOT_PATH "$ENV{TBOX_DEP_STAGING}")
-elseif(DEFINED TBOX_DEP_STAGING)
-    list(APPEND CMAKE_FIND_ROOT_PATH "${TBOX_DEP_STAGING}")
+if(DEFINED ENV{TBOX_SDK_STAGING} AND NOT "$ENV{TBOX_SDK_STAGING}" STREQUAL "")
+    list(PREPEND CMAKE_FIND_ROOT_PATH "$ENV{TBOX_SDK_STAGING}/usr")
+elseif(DEFINED TBOX_SDK_STAGING AND NOT "${TBOX_SDK_STAGING}" STREQUAL "")
+    list(PREPEND CMAKE_FIND_ROOT_PATH "${TBOX_SDK_STAGING}/usr")
+endif()
+if(DEFINED ENV{TBOX_DEP_STAGING} AND NOT "$ENV{TBOX_DEP_STAGING}" STREQUAL "")
+    list(PREPEND CMAKE_FIND_ROOT_PATH "$ENV{TBOX_DEP_STAGING}/usr")
+elseif(DEFINED TBOX_DEP_STAGING AND NOT "${TBOX_DEP_STAGING}" STREQUAL "")
+    list(PREPEND CMAKE_FIND_ROOT_PATH "${TBOX_DEP_STAGING}/usr")
+endif()
+
+# CMAKE_PREFIX_PATH mirrors the find-root order so find_package(CONFIG)
+# resolves to the same staging roots.
+set(CMAKE_PREFIX_PATH "")
+if(DEFINED ENV{TBOX_SDK_STAGING} AND NOT "$ENV{TBOX_SDK_STAGING}" STREQUAL "")
+    list(PREPEND CMAKE_PREFIX_PATH "$ENV{TBOX_SDK_STAGING}/usr")
+elseif(DEFINED TBOX_SDK_STAGING AND NOT "${TBOX_SDK_STAGING}" STREQUAL "")
+    list(PREPEND CMAKE_PREFIX_PATH "${TBOX_SDK_STAGING}/usr")
+endif()
+if(DEFINED ENV{TBOX_DEP_STAGING} AND NOT "$ENV{TBOX_DEP_STAGING}" STREQUAL "")
+    list(PREPEND CMAKE_PREFIX_PATH "$ENV{TBOX_DEP_STAGING}/usr")
+elseif(DEFINED TBOX_DEP_STAGING AND NOT "${TBOX_DEP_STAGING}" STREQUAL "")
+    list(PREPEND CMAKE_PREFIX_PATH "${TBOX_DEP_STAGING}/usr")
 endif()
 
 # --- Find mode ---
@@ -113,5 +134,6 @@ message(STATUS "  C compiler:       ${CMAKE_C_COMPILER}")
 message(STATUS "  C++ compiler:     ${CMAKE_CXX_COMPILER}")
 message(STATUS "  Sysroot:          ${CMAKE_SYSROOT}")
 message(STATUS "  Find root path:   ${CMAKE_FIND_ROOT_PATH}")
+message(STATUS "  Prefix path:      ${CMAKE_PREFIX_PATH}")
 message(STATUS "  C standard:       ${CMAKE_C_STANDARD}")
 message(STATUS "  C++ standard:     ${CMAKE_CXX_STANDARD}")

@@ -42,6 +42,8 @@ class ArtifactEntry:
     sha256: str
     size: int
     file_type: str
+    install_component: str = "unknown"
+    staging: str = "unknown"
     elf_info: dict[str, Any] | None = None
 
 
@@ -54,11 +56,13 @@ class ArtifactManifest:
         profile: str,
         platform_manifest: PlatformManifest,
         sysroot_manifest: SysrootManifest,
+        dependency_lock: Any | None = None,
     ):
         self.platform = platform
         self.profile = profile
         self.platform_manifest = platform_manifest
         self.sysroot_manifest = sysroot_manifest
+        self.dependency_lock = dependency_lock
         self.entries: list[ArtifactEntry] = []
         self.generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -83,6 +87,8 @@ class ArtifactManifest:
         owner_target: str,
         version: str,
         git_commit: str,
+        install_component: str = "unknown",
+        staging: str = "unknown",
     ) -> None:
         """Add a staged file to the manifest, classifying and inspecting it."""
         cls = classify_file(staged.full_path)
@@ -100,6 +106,8 @@ class ArtifactManifest:
             sha256=staged.sha256,
             size=staged.size,
             file_type=cls.file_type,
+            install_component=install_component,
+            staging=staging,
             elf_info=elf_info,
         )
         self.add_entry(entry)
@@ -123,6 +131,23 @@ class ArtifactManifest:
                 conflicts,
             )
 
+    def _dependency_lock_summary(self) -> list[dict[str, Any]]:
+        if self.dependency_lock is None:
+            return []
+        summary: list[dict[str, Any]] = []
+        for dep in self.dependency_lock:
+            summary.append({
+                "name": dep.name,
+                "version": dep.version,
+                "license": dep.license,
+                "boundary": dep.boundary,
+                "architecture": dep.architecture,
+                "linkage": dep.linkage,
+                "source_sha256": dep.source_sha256,
+                "source_pinned": dep.is_source_pinned,
+            })
+        return summary
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": "0.1.0",
@@ -141,6 +166,7 @@ class ArtifactManifest:
                 "digest": self.sysroot_manifest.digest,
                 "import_status": self.sysroot_manifest.import_status,
             },
+            "dependency_lock": self._dependency_lock_summary(),
             "artifact_count": len(self.entries),
             "artifacts": [asdict(e) for e in self.entries],
         }

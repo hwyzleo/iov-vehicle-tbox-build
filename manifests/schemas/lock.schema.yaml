@@ -1,0 +1,85 @@
+# JSON Schema (Draft-07) for TBOX Build Dependency Lock File
+# Validates dependencies/lock.yaml
+$schema: "http://json-schema.org/draft-07/schema#"
+title: TBOX Build Dependency Lock
+type: object
+required:
+  - dependencies
+properties:
+  dependencies:
+    type: object
+    patternProperties:
+      "^[a-z][a-z0-9-]*$":
+        type: object
+        required:
+          - version
+          - source
+          - license
+          - boundary
+          - architecture
+          - linkage
+        additionalProperties: false
+        properties:
+          version:
+            type: string
+            minLength: 1
+          source:
+            type: object
+            required:
+              - url
+              - sha256
+            additionalProperties: false
+            properties:
+              url:
+                type: string
+                minLength: 1
+              sha256:
+                type: string
+                minLength: 1
+          license:
+            type: string
+            minLength: 1
+          boundary:
+            type: string
+            enum:
+              - TARGET
+          architecture:
+            type: string
+            enum:
+              - aarch64
+          linkage:
+            type: string
+            enum:
+              - static
+              - shared
+          patches:
+            type: array
+            items:
+              type: object
+              required:
+                - file
+                - sha256
+              additionalProperties: false
+              properties:
+                file:
+                  type: string
+                  minLength: 1
+                sha256:
+                  type: string
+                  minLength: 1
+          cmake:
+            type: object
+            additionalProperties: false
+            properties:
+              options:
+                type: object
+  cache:
+    type: object
+    additionalProperties: false
+    properties:
+      key_components:
+        type: array
+        items:
+          type: string
+      directory:
+        type: string

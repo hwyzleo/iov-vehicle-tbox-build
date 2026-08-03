@@ -1,5 +1,7 @@
 # TBOX Build Release Set Manifest
-# Phase 1 built-in minimal release set for self-verification.
+# Built-in minimal release set (CR-001) plus the framework-only release
+# set (CR-002).
+
 release_sets:
   tbox-orin-minimal:
     description: "Minimal TBOX Orin release set for BUILD v0.1-alpha self-verification"
@@ -8,3 +10,10 @@ release_sets:
     services:
       - tbox-hello-lib
       - tbox-hello-cli
+
+  tbox-framework-orin:
+    description: "Framework-only Orin release set (CR-002 first public dependency)"
+    platform: orin
+    profile: release
+    services:
+      - framework

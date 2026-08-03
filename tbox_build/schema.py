@@ -74,3 +74,18 @@ def validate_release_set_manifest(
             f"Release-set manifest schema validation failed ({len(errors)} error(s))",
             _format_errors(errors),
         )
+
+
+def validate_dependency_lock(data: dict[str, Any], project_root: Path | None = None) -> None:
+    """Validate a dependency lock dict against the lock schema.
+
+    Raises SchemaValidationError on failure.
+    """
+    schema = load_schema("lock", project_root)
+    validator = jsonschema.Draft7Validator(schema)
+    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
+    if errors:
+        raise SchemaValidationError(
+            f"Dependency lock schema validation failed ({len(errors)} error(s))",
+            _format_errors(errors),
+        )

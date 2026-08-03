@@ -423,6 +423,67 @@ def classify_file(path: Path) -> FileClassification:
 
 
 # ---------------------------------------------------------------------------
+# ar archive member inspection
+# ---------------------------------------------------------------------------
+
+
+def check_archive_members(
+    path: Path,
+    expected_machine: int = EM_AARCH64,
+    expected_class: int = _ELFCLASS64,
+) -> tuple[int, list[str]]:
+    """Inspect every ELF member of an ar archive.
+
+    Returns ``(members_checked, violations)``. Non-ELF members (such as
+    symbol tables or long-name indices) are skipped. Each ELF member must
+    be ELF64 and match *expected_machine* (default AArch64).
+    """
+    violations: list[str] = []
+    checked = 0
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(8)
+        if magic != b"!<arch>\n":
+            return 0, [f"{path}: not a valid ar archive (bad magic)"]
+        with open(path, "rb") as f:
+            f.read(8)  # magic
+            while True:
+                header = f.read(60)
+                if len(header) < 60:
+                    break
+                name = header[0:16].decode("ascii", errors="replace").strip()
+                size_field = header[48:58].decode("ascii", errors="replace").strip()
+                try:
+                    size = int(size_field)
+                except ValueError:
+                    break
+                # Skip symbol table / long-name index members.
+                if name in ("", "/") or name.startswith("//") or name.startswith("/SYM"):
+                    f.seek((size + 1) // 2 * 2, 1)
+                    continue
+                member_data = f.read(size)
+                if size % 2 == 1:
+                    f.read(1)
+                if len(member_data) >= 4 and member_data[:4] == _ELF_MAGIC:
+                    checked += 1
+                    ei_class = member_data[4]
+                    e_machine = struct.unpack_from("<H", member_data, 18)[0]
+                    if ei_class != expected_class:
+                        violations.append(
+                            f"{path}: member '{name}' is not ELF64 (class={ei_class})"
+                        )
+                    elif e_machine != expected_machine:
+                        violations.append(
+                            f"{path}: member '{name}' is not "
+                            f"{_MACHINE_NAMES.get(expected_machine, '?')} "
+                            f"(machine={e_machine})"
+                        )
+    except OSError as exc:
+        return 0, [f"{path}: could not read archive ({exc})"]
+    return checked, violations
+
+
+# ---------------------------------------------------------------------------
 # Pollution checking
 # ---------------------------------------------------------------------------
 
@@ -461,9 +522,16 @@ def check_file(
         )
         return result
 
-    # ar archives are allowed but we can't check their contents easily
+    # ar archives: deeply check each ELF member is AArch64 ELF64.
     if cls.file_type == "ar_archive":
-        result.warnings.append(f"Static library (ar archive) not deeply checked: {path}")
+        members_checked, arch_violations = check_archive_members(
+            path, expected_machine=expected_machine, expected_class=expected_class
+        )
+        result.violations.extend(arch_violations)
+        if members_checked == 0 and not arch_violations:
+            result.warnings.append(
+                f"Static library has no ELF members to check: {path}"
+            )
         return result
 
     # Scripts and data files are not checked

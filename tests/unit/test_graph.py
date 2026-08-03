@@ -18,9 +18,9 @@ def _make_service(
         id=sid,
         repository=repository,
         build=BuildConfig(
-            target=sid,
             preset="orin-release",
-            dependencies=dependencies or [],
+            targets=[sid],
+            service_dependencies=dependencies or [],
         ),
         runtime=RuntimeConfig(),
     )
