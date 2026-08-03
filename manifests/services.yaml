@@ -78,7 +78,7 @@ services:
     build:
       preset: orin-release
       targets:
-        - tbox-prov
+        - tbox_prov
         - tbox_prov_client
       service_dependencies:
         - framework
