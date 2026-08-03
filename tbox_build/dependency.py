@@ -347,10 +347,26 @@ class RecipeExecutor:
                 try:
                     saved = json.loads(marker.read_text())
                     if saved.get("cache_key") == cache_key:
-                        result.status = "cached"
-                        result.source_sha256 = entry.source_sha256
-                        print(f"  [CACHED] {name} (key={cache_key[:12]})")
-                        return result
+                        # Inputs match, but the cache is only valid if the
+                        # staged products are still present. staging.prepare(
+                        # clean=True) wipes out/<plat>/<prof>/ (including
+                        # deps/) without touching this marker, so a stale
+                        # marker with missing products must trigger a rebuild
+                        # instead of a silent skip that leaves deps/ empty.
+                        installed = saved.get("installed_files", [])
+                        staging_usr = self.staging.dep_staging_usr()
+                        if installed and all(
+                            (staging_usr / f).exists() for f in installed
+                        ):
+                            result.status = "cached"
+                            result.source_sha256 = entry.source_sha256
+                            result.installed_files = installed
+                            print(f"  [CACHED] {name} (key={cache_key[:12]})")
+                            return result
+                        print(
+                            f"  [STALE] {name}: cache marker present but "
+                            f"staging products missing; rebuilding"
+                        )
                 except (OSError, json.JSONDecodeError):
                     pass
 
@@ -451,6 +467,7 @@ class RecipeExecutor:
                 "version": entry.version,
                 "source_sha256": entry.source_sha256,
                 "product_sha256": result.product_sha256,
+                "installed_files": result.installed_files,
             }))
             result.status = "success"
             print(f"  [OK] {name}: {len(result.installed_files)} file(s), "

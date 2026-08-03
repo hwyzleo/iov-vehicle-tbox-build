@@ -3,6 +3,7 @@ verification, PENDING guard, archive member architecture check."""
 
 from __future__ import annotations
 
+import json
 import struct
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -12,6 +13,8 @@ import pytest
 from tbox_build.errors import BuildFailure
 from tbox_build.manifest import DependencyEntry, DependencyLock
 from tbox_build.dependency import RecipeExecutor
+from tbox_build.staging import StagingDir
+from tbox_build.orchestrator import BuildConfig
 from tbox_build.elfcheck import check_archive_members, EM_AARCH64
 
 
@@ -161,3 +164,92 @@ class TestArchiveMemberCheck:
         checked, violations = check_archive_members(archive)
         assert checked == 2
         assert len(violations) >= 1
+
+
+class TestRecipeCacheInvalidation:
+    """Recipe cache must be invalidated when staged products are missing.
+
+    Regression: ``staging.prepare(clean=True)`` wipes out/<plat>/<prof>/
+    (including deps/) but leaves ``dependencies/cache/<name>/.built``, so the
+    recipe wrongly reported CACHED and skipped rebuilding, leaving deps/ empty
+    and breaking downstream find_package().
+    """
+
+    @staticmethod
+    def _real_executor(tmp_path: Path, entry: DependencyEntry):
+        """Executor backed by a real StagingDir (real logs_dir / dep_staging)."""
+        (tmp_path / "dependencies" / "cache").mkdir(parents=True, exist_ok=True)
+        lock = DependencyLock(dependencies={entry.name: entry})
+        staging = StagingDir(tmp_path, "orin", "debug")
+        staging.prepare()
+        config = BuildConfig(platform="orin", profile="debug", dry_run=False)
+        return RecipeExecutor(tmp_path, staging, lock, config)
+
+    @staticmethod
+    def _write_marker(
+        executor: RecipeExecutor,
+        name: str,
+        cache_key: str,
+        installed_files: list[str],
+        *,
+        legacy: bool = False,
+    ):
+        marker = executor.cache_dir / name / ".built"
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "cache_key": cache_key,
+            "version": "0.8.0",
+            "source_sha256": "abc123",
+            "product_sha256": "fake",
+        }
+        if not legacy:
+            data["installed_files"] = installed_files
+        marker.write_text(json.dumps(data))
+
+    def test_cached_when_products_present(self, tmp_path: Path):
+        entry = _entry()
+        ex = self._real_executor(tmp_path, entry)
+        cache_key = ex._cache_key(entry)
+        rel = "lib/libyaml-cpp.a"
+        # Create the staged product the marker claims was installed.
+        staging_usr = ex.staging.dep_staging_usr()
+        (staging_usr / rel).parent.mkdir(parents=True, exist_ok=True)
+        (staging_usr / rel).write_bytes(b"data")
+        self._write_marker(ex, "yaml-cpp", cache_key, [rel])
+
+        result = ex.build("yaml-cpp")
+
+        assert result.status == "cached"
+        assert result.installed_files == [rel]
+        assert result.source_sha256 == entry.source_sha256
+
+    def test_rebuilds_when_products_missing(self, tmp_path: Path):
+        """A stale marker with missing products must NOT short-circuit to
+        CACHED. With no source archive available, the fall-through rebuild
+        surfaces as a BuildFailure from _locate_source -- proving the cache
+        was not trusted. (Buggy code returns "cached" and never raises.)"""
+        entry = _entry()
+        ex = self._real_executor(tmp_path, entry)
+        cache_key = ex._cache_key(entry)
+        rel = "lib/libyaml-cpp.a"
+        # Marker claims built, but NO product on disk (simulates --clean).
+        self._write_marker(ex, "yaml-cpp", cache_key, [rel])
+
+        with pytest.raises(BuildFailure, match="not found in cache"):
+            ex.build("yaml-cpp")
+
+    def test_legacy_marker_without_installed_files_is_stale(self, tmp_path: Path):
+        """Backward compat: a pre-fix marker lacking installed_files cannot
+        be validated, so it is treated as stale and rebuilt (one-time)."""
+        entry = _entry()
+        ex = self._real_executor(tmp_path, entry)
+        cache_key = ex._cache_key(entry)
+        rel = "lib/libyaml-cpp.a"
+        # Product present, but marker is legacy format (no installed_files).
+        staging_usr = ex.staging.dep_staging_usr()
+        (staging_usr / rel).parent.mkdir(parents=True, exist_ok=True)
+        (staging_usr / rel).write_bytes(b"data")
+        self._write_marker(ex, "yaml-cpp", cache_key, [rel], legacy=True)
+
+        with pytest.raises(BuildFailure, match="not found in cache"):
+            ex.build("yaml-cpp")
