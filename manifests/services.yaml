@@ -3,6 +3,7 @@
 # entry (CR-002). Dependency fields use the explicit service_dependencies
 # / target_dependencies split; install_components use {name, staging}.
 # PROV service entry added by TBOX-PROV-DSN-CR-009.
+# SEC service entry added by TBOX-SEC-DSN-CR-012.
 
 services:
   tbox-hello-lib:
@@ -99,5 +100,41 @@ services:
         - /etc/tbox/conf.d
       persistent_paths:
         - /var/tbox/prov
+      required_devices: []
+      capabilities: []
+
+  sec:
+    description: "TBOX security service (CR-012: tbox_sec daemon + tbox::sec_client SDK)"
+    kind: service
+    source_dir: ../iov-vehicle-tbox-sec
+    build:
+      preset: orin-release
+      targets:
+        - tbox_sec
+        - tbox_sec_client
+      service_dependencies:
+        - framework
+        - prov
+      # curl: SEC 直接 TARGET 依赖（cloud_client 证书注入/CSR 提交；OpenSSL 来自 sysroot）
+      target_dependencies:
+        - curl
+      install_components:
+        - name: sec-sdk
+          staging: sdk
+        - name: sec-runtime
+          staging: rootfs
+    runtime:
+      systemd_units:
+        - tbox-sec.service
+      # SEC 启动时经 framework-ipc 连接 tbox-prov.sock（IpcProvService::initialize），
+      # PROV 未就绪则 initialize 失败，故登记真实启动顺序依赖。
+      after:
+        - tbox-prov.service
+      health_check: tests/smoke/sec-health.sh
+      smoke_test: tests/smoke/sec-security.sh
+      config_paths:
+        - /etc/tbox/conf.d
+      persistent_paths:
+        - /var/tbox/sec
       required_devices: []
       capabilities: []

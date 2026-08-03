@@ -44,7 +44,8 @@ class TestLoadYaml:
 class TestServiceManifest:
     def test_load_service_manifest(self, project_root: Path):
         manifest = load_service_manifest(project_root / "manifests" / "services.yaml")
-        assert len(manifest) == 4
+        # CR-012: sec 服务加入后共 5 个服务
+        assert len(manifest) == 5
         assert "tbox-hello-lib" in manifest
         assert "tbox-hello-cli" in manifest
         assert "framework" in manifest
@@ -124,7 +125,8 @@ class TestProject:
     def test_project_load_all(self, project_root: Path):
         project = Project(project_root)
         sm = project.load_service_manifest()
-        assert len(sm) == 4
+        # CR-012: sec 服务加入后共 5 个服务
+        assert len(sm) == 5
         pm = project.load_platform_manifest()
         assert pm.platform == "orin"
 

@@ -46,10 +46,12 @@ class TestEndToEndValidation:
         # 4. Dependency graph
         graph = DependencyGraph(service_manifest)
         order = graph.build_order()
-        assert len(order) == 4
+        # CR-012: sec 服务加入后共 5 个服务（依赖 prov/framework，拓扑序在 prov 之后）
+        assert len(order) == 5
         assert order.index("tbox-hello-lib") < order.index("tbox-hello-cli")
         assert "framework" in order
         assert "prov" in order
+        assert order.index("prov") < order.index("sec")
 
         # 5. Release set closure
         rs = release_set_manifest.get("tbox-orin-minimal")

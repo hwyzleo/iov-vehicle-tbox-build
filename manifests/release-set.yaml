@@ -26,3 +26,12 @@ release_sets:
     services:
       - framework
       - prov
+
+  tbox-sec-orin:
+    description: "Framework + PROV + SEC Orin release set (TBOX-SEC-DSN-CR-012)"
+    platform: orin
+    profile: release
+    services:
+      - framework
+      - prov
+      - sec

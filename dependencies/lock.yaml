@@ -38,6 +38,28 @@ dependencies:
       options:
         JSON_BuildTests: "OFF"
 
+  curl:
+    version: "7.68.0"
+    source:
+      url: "https://github.com/curl/curl/releases/download/curl-7_68_0/curl-7.68.0.tar.gz"
+      # Orin sysroot 仅含 runtime libcurl.so.4（无 dev 头/软链/.pc），无法从 sysroot 解析；
+      # 故按 TARGET 源码构建。SHA-256 由锁定 URL 实际产物计算并核验（4096350 bytes）@2026-08-03。
+      sha256: "1dd7604e418b0b9a9077f62f763f6684c1b092a7bc17e3f354b8ad5c964d7358"
+    license: curl (MIT-like)
+    boundary: TARGET
+    architecture: aarch64
+    # static: 非系统自建 TARGET 库,静态链接进 SEC,避免与 base image libcurl.so.4.6.0 SONAME 冲突。
+    # curl 的传递依赖 OpenSSL/zlib 仍动态链接(来自 sysroot,平台统管 ABI/安全更新)。
+    linkage: static
+    patches: []
+    cmake:
+      options:
+        BUILD_CURL_EXE: "OFF"
+        BUILD_TESTING: "OFF"
+        CURL_USE_OPENSSL: "ON"
+        BUILD_SHARED_LIBS: "OFF"
+        BUILD_STATIC_LIBS: "ON"
+
 cache:
   key_components:
     - platform_manifest_digest

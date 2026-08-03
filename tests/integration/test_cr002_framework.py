@@ -128,11 +128,19 @@ class TestReleaseBuildRejectsPendingSha:
             license="MIT", boundary="TARGET",
             architecture="aarch64", linkage="static",
         )
+        # curl (added by CR-012) must be present for the same reason.
+        curl_entry = DependencyEntry(
+            name="curl", version="7.68.0", source_url="http://x",
+            source_sha256="d69f9deb6a75e2580465c6c4c5111b89c4dc2fa94e3a85fcd2ffcd9a143d9273",
+            license="curl (MIT-like)", boundary="TARGET",
+            architecture="aarch64", linkage="shared",
+        )
         monkeypatch.setattr(
             project, "load_dependency_lock",
             lambda: DependencyLock(dependencies={
                 "yaml-cpp": pending_entry,
                 "nlohmann-json": nlohmann_entry,
+                "curl": curl_entry,
             }),
         )
         config = BuildConfig(platform="orin", profile="release", dry_run=True)
