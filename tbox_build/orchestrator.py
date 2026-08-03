@@ -583,8 +583,16 @@ class BuildOrchestrator:
                 comp = comp_by_file.get(path)
                 comp_name = comp.name if comp else "unknown"
                 comp_staging = comp.staging if comp else "rootfs"
-                staging_prefix = "sdk/" if comp_staging == "sdk" else "rootfs/"
-                file_owners[staging_prefix + path] = (
+                if comp_staging == "sdk":
+                    # SDK components install into a per-service DESTDIR
+                    # (sdk/<service_id>), so ``path`` is relative to that
+                    # subdir. scan_files() walks the shared sdk_root (sdk/)
+                    # and emits rel paths like "<service_id>/<path>"; include
+                    # the service_id segment so the owner lookup key matches.
+                    rel_key = f"sdk/{result.id}/{path}"
+                else:
+                    rel_key = f"rootfs/{path}"
+                file_owners[rel_key] = (
                     result.id, target_str, "0.1.0", comp_name, comp_staging,
                 )
 

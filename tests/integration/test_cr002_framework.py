@@ -10,7 +10,13 @@ from pathlib import Path
 import pytest
 
 from tbox_build.manifest import Project
-from tbox_build.orchestrator import BuildOrchestrator, BuildConfig
+from tbox_build.orchestrator import (
+    BuildOrchestrator,
+    BuildConfig,
+    ComponentInstallResult,
+    ServiceResult,
+)
+from tbox_build.staging import StagingDir
 from tbox_build.graph import DependencyGraph
 from tbox_build.elfcheck import check_archive_members, check_staging, EM_AARCH64
 
@@ -174,3 +180,99 @@ class TestArchiveMemberCheck:
         results = check_staging(tmp_path / "install-root")
         all_violations = [v for r in results for v in r.violations]
         assert any("not AArch64" in v or "62" in v for v in all_violations)
+
+
+class TestArtifactManifestOwnership:
+    """Non-dry-run artifact manifest ownership attribution.
+
+    Regression test for the sdk-staging owner lookup miss: sdk artifacts must
+    be attributed to their owner service and install component instead of
+    falling back to "unknown". Exercises the real snapshot -> manifest
+    pipeline (no CMake) by creating staged files and deriving
+    ``installed_files`` via the orchestrator's own snapshot helpers so the
+    path basis matches production exactly.
+    """
+
+    @staticmethod
+    def _write(destdir: Path, rel: str, content: bytes = b"data\n") -> None:
+        p = destdir / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(content)
+
+    def test_sdk_and_rootfs_artifacts_attributed(self, project_root: Path, tmp_path: Path):
+        project = Project(project_root)
+        config = BuildConfig(platform="orin", profile="debug", dry_run=False)
+        orch = BuildOrchestrator(project, config)
+        # Redirect staging to tmp so the real out/ tree is untouched.
+        orch.staging = StagingDir(tmp_path, config.platform, config.profile)
+        orch.staging.prepare()
+
+        # Simulate a real framework install into the per-service sdk DESTDIR
+        # (sdk/framework) and the shared rootfs DESTDIR (install-root).
+        sdk_destdir = orch.staging.component_destdir("framework", "sdk")
+        rootfs_destdir = orch.staging.component_destdir("framework", "rootfs")
+
+        sdk_rels = [
+            "usr/include/tbox-framework/application.h",
+            "usr/lib/cmake/framework/framework-config.cmake",
+        ]
+        rootfs_rels = ["usr/lib/libframework-runtime.so"]
+
+        # Snapshot the (empty) DESTDIRs before install, exactly as
+        # _build_service does, so installed_files carry the real path basis.
+        sdk_before = orch._snapshot_under(sdk_destdir)
+        rootfs_before = orch._snapshot_under(rootfs_destdir)
+
+        for rel in sdk_rels:
+            self._write(sdk_destdir, rel)
+        for rel in rootfs_rels:
+            self._write(rootfs_destdir, rel)
+
+        sdk_installed = orch._new_files_under(sdk_destdir, sdk_before)
+        rootfs_installed = orch._new_files_under(rootfs_destdir, rootfs_before)
+
+        sdk_comp = ComponentInstallResult(
+            name="framework-sdk", staging="sdk",
+            destdir=str(sdk_destdir), status="success",
+            installed_files=sdk_installed,
+        )
+        rt_comp = ComponentInstallResult(
+            name="framework-runtime", staging="rootfs",
+            destdir=str(rootfs_destdir), status="success",
+            installed_files=rootfs_installed,
+        )
+        sr = ServiceResult(
+            id="framework", status="success",
+            targets=["framework-application"],
+            components=[sdk_comp, rt_comp],
+            installed_files=sorted(sdk_installed + rootfs_installed),
+        )
+
+        service_manifest = project.load_service_manifest()
+        lock = project.load_dependency_lock()
+        manifest = orch._generate_artifact_manifest(
+            service_manifest, lock, git_commit="deadbeef",
+            service_results=[sr],
+        )
+
+        by_path = {e.path: e for e in manifest.entries}
+
+        # --- sdk artifacts: the bug made these "unknown" ---
+        for rel in sdk_rels:
+            entry = by_path[f"sdk/framework/{rel}"]
+            assert entry.path.startswith("sdk/framework/")
+            assert entry.owner_service == "framework"
+            assert entry.install_component == "framework-sdk"
+            assert entry.staging == "sdk"
+
+        # --- rootfs artifacts: unaffected by the bug; guard regressions ---
+        for rel in rootfs_rels:
+            entry = by_path[f"rootfs/{rel}"]
+            assert entry.owner_service == "framework"
+            assert entry.install_component == "framework-runtime"
+            assert entry.staging == "rootfs"
+
+        # No artifact may be unattributed.
+        assert all(e.owner_service != "unknown" for e in manifest.entries)
+        assert all(e.install_component != "unknown" for e in manifest.entries)
+        assert all(e.staging != "unknown" for e in manifest.entries)
