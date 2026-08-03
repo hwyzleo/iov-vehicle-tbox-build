@@ -211,11 +211,29 @@ class TestDependencyLock:
         assert dep.is_static
         assert dep.cmake_options["YAML_BUILD_SHARED_LIBS"] == "OFF"
 
-    def test_pending_sha256_not_pinned(self, project_root: Path):
+    def test_yaml_cpp_source_is_pinned(self, project_root: Path):
         project = Project(project_root)
         lock = project.load_dependency_lock()
         dep = lock.get("yaml-cpp")
-        assert not dep.is_source_pinned
+        assert dep.is_source_pinned
+        assert dep.source_sha256 == "fbe74bbdcee21d656715688706da3c8becfd946d92cd44705cc6098bb23b3a16"
+
+    def test_pending_sha256_detected_as_unpinned(self, tmp_path: Path):
+        lock_yaml = tmp_path / "lock.yaml"
+        lock_yaml.write_text(
+            "dependencies:\n"
+            "  foo:\n"
+            "    version: '1.0'\n"
+            "    source:\n"
+            "      url: http://x\n"
+            "      sha256: PENDING-FILL-BEFORE-RELEASE\n"
+            "    license: MIT\n"
+            "    boundary: TARGET\n"
+            "    architecture: aarch64\n"
+            "    linkage: static\n"
+        )
+        lock = load_dependency_lock(lock_yaml)
+        assert not lock.get("foo").is_source_pinned
 
     def test_filled_sha256_pinned(self, tmp_path: Path):
         lock_yaml = tmp_path / "lock.yaml"

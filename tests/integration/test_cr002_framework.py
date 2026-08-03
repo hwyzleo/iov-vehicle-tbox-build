@@ -102,12 +102,25 @@ class TestFrameworkCmakeEnv:
 
 
 class TestReleaseBuildRejectsPendingSha:
-    def test_release_build_fails_on_pending_source(self, project_root: Path):
+    def test_release_build_fails_on_pending_source(self, project_root: Path, monkeypatch):
         project = Project(project_root)
+        # Force a PENDING lock to exercise the release guard, independent of
+        # the real (now-pinned) lock.yaml value.
+        from tbox_build.manifest import DependencyLock, DependencyEntry
+        pending_entry = DependencyEntry(
+            name="yaml-cpp", version="0.8.0", source_url="http://x",
+            source_sha256="PENDING-FILL-BEFORE-RELEASE",
+            license="BSD-3-Clause", boundary="TARGET",
+            architecture="aarch64", linkage="static",
+        )
+        monkeypatch.setattr(
+            project, "load_dependency_lock",
+            lambda: DependencyLock(dependencies={"yaml-cpp": pending_entry}),
+        )
         config = BuildConfig(platform="orin", profile="release", dry_run=True)
         orch = BuildOrchestrator(project, config)
         report = orch.build(set_id="tbox-framework-orin")
-        # yaml-cpp sha256 is PENDING in lock.yaml -> release build must fail
+        # yaml-cpp sha256 is PENDING -> release build must fail
         assert report.status == "failed"
         assert any("PENDING" in e or "not pinned" in e for e in report.errors)
 
