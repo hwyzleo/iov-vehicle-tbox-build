@@ -44,14 +44,16 @@ class TestLoadYaml:
 class TestServiceManifest:
     def test_load_service_manifest(self, project_root: Path):
         manifest = load_service_manifest(project_root / "manifests" / "services.yaml")
-        # CR-011: mqtt 服务加入后共 6 个服务
-        assert len(manifest) == 6
+        # CR-011: mqtt 服务加入后共 6 个服务；CR-006: someip 加入后共 8 个
+        assert len(manifest) == 8
         assert "tbox-hello-lib" in manifest
         assert "tbox-hello-cli" in manifest
         assert "framework" in manifest
         assert "prov" in manifest
         assert "sec" in manifest
         assert "mqtt" in manifest
+        assert "tsp" in manifest
+        assert "someip" in manifest
 
     def test_service_fields(self, project_root: Path):
         manifest = load_service_manifest(project_root / "manifests" / "services.yaml")
@@ -127,8 +129,8 @@ class TestProject:
     def test_project_load_all(self, project_root: Path):
         project = Project(project_root)
         sm = project.load_service_manifest()
-        # CR-011: mqtt 服务加入后共 6 个服务
-        assert len(sm) == 6
+        # CR-011: mqtt 服务加入后共 6 个服务；CR-006: someip 加入后共 8 个
+        assert len(sm) == 8
         pm = project.load_platform_manifest()
         assert pm.platform == "orin"
 

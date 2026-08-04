@@ -83,6 +83,61 @@ dependencies:
         WITH_CJSON: "OFF"
         WITH_SRV: "OFF"
 
+  # ================================================================
+  # SOME/IP 中间件（TBOX-SOMEIP-DSN-CR-006 §6.3/§11.4）
+  #   TARGET：vsomeip + CommonAPI runtime（capicxx core / someip），
+  #   来自受控 recipe，安装到 TBOX_DEP_STAGING；SOMEIP daemon 经
+  #   pkg-config（vsomeip3 / CommonAPI / CommonAPI-SomeIP）消费。
+  #   HOST：CommonAPI generator（commonapi-generator /
+  #   commonapi-someip-generator，Java）不在本文件范围（仅 HOST 执行，
+  #   版本锁定记入 Artifact Manifest）。
+  #   SHA-256 均 PENDING：下载受控源码后计算填充；release build 前必须完成。
+  # ================================================================
+  vsomeip:
+    version: "3.1.20.3"
+    source:
+      url: "https://github.com/COVESA/vsomeip/archive/refs/tags/3.1.20.3.tar.gz"
+      sha256: "56ba4103e7e92ab2f5597d4fee9827f26698c30618faa5e74793a812a76f3c2c"
+    license: MPL-2.0
+    boundary: TARGET
+    architecture: aarch64
+    linkage: shared
+    patches: []
+    cmake:
+      options:
+        # 选项名以 recipe 实装时 vsomeip 3.x CMake 事实为准（ENABLE_TEST/
+        # ENABLE_EXAMPLES/ENABLE_SIGNAL_HANDLING 等）；Boost 头文件需由
+        # recipe 提供（orin sysroot 仅含 Boost 运行时库，无 dev 头）。
+        ENABLE_TEST: "OFF"
+        ENABLE_EXAMPLES: "OFF"
+
+  commonapi-core:
+    version: "3.2.3-r7"
+    source:
+      url: "https://github.com/COVESA/capicxx-core-runtime/archive/refs/tags/3.2.3-r7.tar.gz"
+      sha256: "07386f8b4f32a9306328fbc9363d6703a798de50b064d7d87f92eef3c4eafdb4"
+    license: MPL-2.0
+    boundary: TARGET
+    architecture: aarch64
+    linkage: shared
+    patches: []
+    # 注意：capicxx-core-runtime 使用 autotools（configure/make），非 CMake；
+    # 通用 recipe executor 当前仅支持 CMake-based 依赖（dependency.py），
+    # 非 CMake 构建步骤需 BUILD 配对 CR 扩展（通用缺口，非 SOMEIP 特有问题）。
+
+  commonapi-someip:
+    version: "3.2.3-r8"
+    source:
+      url: "https://github.com/COVESA/capicxx-someip-runtime/archive/refs/tags/3.2.3-r8.tar.gz"
+      sha256: "227b4dfe466ca73391f6092ba01ca32d8c7fd4e149c77b0f12abffe4cd2d788e"
+    license: MPL-2.0
+    boundary: TARGET
+    architecture: aarch64
+    linkage: shared
+    patches: []
+    # autotools 构建（同 commonapi-core）；需 vsomeip 与 core runtime 先行
+    # 进入 staging 并暴露 pkg-config/.pc。
+
 cache:
   key_components:
     - platform_manifest_digest

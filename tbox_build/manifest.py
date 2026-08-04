@@ -58,6 +58,7 @@ class BuildConfig:
     install_components: list[InstallComponent] = field(default_factory=list)
     service_dependencies: list[str] = field(default_factory=list)
     target_dependencies: list[str] = field(default_factory=list)
+    cmake_cache_variables: dict[str, str] = field(default_factory=dict)
     _legacy_dependencies: list[str] = field(default_factory=list)
 
     @property
@@ -389,6 +390,10 @@ def _parse_build_config(data: dict[str, Any]) -> BuildConfig:
     target_deps = [str(d) for d in data.get("target_dependencies", [])]
     _ensure_unique(target_deps, "target_dependencies")
 
+    cmake_cache_vars = {
+        str(k): str(v) for k, v in data.get("cmake_cache_variables", {}).items()
+    }
+
     legacy_deps: list[str] = []
     if "dependencies" in data:
         if service_deps or target_deps:
@@ -405,6 +410,7 @@ def _parse_build_config(data: dict[str, Any]) -> BuildConfig:
         install_components=install_components,
         service_dependencies=service_deps,
         target_dependencies=target_deps,
+        cmake_cache_variables=cmake_cache_vars,
         _legacy_dependencies=legacy_deps,
     )
 

@@ -135,12 +135,36 @@ class TestReleaseBuildRejectsPendingSha:
             license="curl (MIT-like)", boundary="TARGET",
             architecture="aarch64", linkage="shared",
         )
+        # SOME/IP 中间件（added by TBOX-SOMEIP-DSN-CR-006）必须出现在 patched
+        # lock 中，避免 target_dependencies 校验在 PENDING release guard 之前
+        # 因 missing-entry 短路（同 nlohmann-json/curl 的注释理由）。
+        someip_deps = [
+            DependencyEntry(
+                name=name, version=v, source_url="http://x",
+                source_sha256="d69f9deb6a75e2580465c6c4c5111b89c4dc2fa94e3a85fcd2ffcd9a143d9273",
+                license="MPL-2.0", boundary="TARGET",
+                architecture="aarch64", linkage="shared",
+            )
+            for name, v in [("vsomeip", "3.1.20.3"),
+                            ("commonapi-core", "3.2.3-r7"),
+                            ("commonapi-someip", "3.2.3-r8")]
+        ]
+        # mosquitto: mqtt 服务的 target dependency（services.yaml 原有），
+        # patched lock 必须包含，避免 mqtt 的 missing-entry 校验短路。
+        mosquitto_entry = DependencyEntry(
+            name="mosquitto", version="2.0.20", source_url="http://x",
+            source_sha256="d69f9deb6a75e2580465c6c4c5111b89c4dc2fa94e3a85fcd2ffcd9a143d9273",
+            license="EPL-2.0", boundary="TARGET",
+            architecture="aarch64", linkage="static",
+        )
         monkeypatch.setattr(
             project, "load_dependency_lock",
             lambda: DependencyLock(dependencies={
                 "yaml-cpp": pending_entry,
                 "nlohmann-json": nlohmann_entry,
                 "curl": curl_entry,
+                "mosquitto": mosquitto_entry,
+                **{d.name: d for d in someip_deps},
             }),
         )
         config = BuildConfig(platform="orin", profile="release", dry_run=True)

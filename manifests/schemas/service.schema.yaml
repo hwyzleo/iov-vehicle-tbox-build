@@ -104,6 +104,13 @@ properties:
                 items:
                   type: string
                   minLength: 1
+              # Per-service CMake cache variables injected as -D<key>=<value>
+              # in the configure step (TBOX-SOMEIP-DSN-CR-006 §11.3: BUILD
+              # 提供受控 HOST/TARGET 输入；e.g. USE_REAL_IPC=ON)。
+              cmake_cache_variables:
+                type: object
+                additionalProperties:
+                  type: string
             allOf:
               # Exactly one of target / targets (at least one required).
               - oneOf:

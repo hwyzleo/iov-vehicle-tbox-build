@@ -207,3 +207,55 @@ services:
         - /var/tbox
       required_devices: []
       capabilities: []
+
+  # SOMEIP service entry added by TBOX-SOMEIP-DSN-CR-006.
+  # SOMEIP 是车内 SOME/IP 网络的唯一门面：对外 vsomeip/CommonAPI + SOME/IP-SD，
+  # 对内经 tbox::tsp_client / tbox::prov_client 消费冻结 release-set SDK。
+  # 只交付 someip-runtime（rootfs）；本期不新增 someip_client SDK / IPC Server。
+  someip:
+    description: "TBOX SOME/IP service (CR-006: in-vehicle SOME/IP facade bridged to TBOX domain clients)"
+    kind: service
+    source_dir: ../iov-vehicle-tbox-someip
+    build:
+      preset: orin-release
+      targets:
+        - tbox-someip
+      # CR-006 §11.3：BUILD 注入 SOMEIP 构建开关（受控输入）：
+      #   USE_REAL_IPC=ON  -> 链接 tbox::tsp_client / tbox::prov_client（冻结 SDK）
+      #   USE_MOCK_SOMEIP=OFF -> 真实 vsomeip/CommonAPI runtime（非 mock）
+      cmake_cache_variables:
+        USE_REAL_IPC: "ON"
+        USE_MOCK_SOMEIP: "OFF"
+      # CR-006 §11.3：SOMEIP 消费 tbox::tsp_client / tbox::prov_client；
+      # framework 是 library（无 unit）。MQTT/SEC 由 TSP/MQTT 闭包带入，不登记。
+      service_dependencies:
+        - framework
+        - tsp
+        - prov
+      # CR-006 §11.4：TARGET vsomeip/CommonAPI runtime 来自受控 recipe/sysroot；
+      # CommonAPI HOST generator 不在 target_dependencies（仅 HOST 执行，
+      # 版本锁定记入 Artifact Manifest）。
+      target_dependencies:
+        - vsomeip
+        - commonapi-core
+        - commonapi-someip
+      install_components:
+        - name: someip-runtime
+          staging: rootfs
+    runtime:
+      systemd_units:
+        - tbox-someip.service
+      # CR-006 §7/§11.5：SOMEIP 作为 consumer 连接 TSP/PROV IPC socket，
+      # 声明真实启动顺序；unit 内 Wants=network-online.target（非 Requires），
+      # 依赖未就绪时延迟 Offer/暂不可用，不阻塞启动。
+      after:
+        - tbox-tsp.service
+        - tbox-prov.service
+      health_check: tests/smoke/someip-health.sh
+      smoke_test: tests/smoke/someip-sd-smoke.sh
+      config_paths:
+        - /etc/tbox/conf.d
+        - /etc/tbox/someip
+      persistent_paths: []
+      required_devices: []
+      capabilities: []

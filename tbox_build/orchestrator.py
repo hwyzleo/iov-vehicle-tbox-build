@@ -192,6 +192,12 @@ class BuildOrchestrator:
             cmd.append(f"-DCMAKE_TOOLCHAIN_FILE={toolchain}")
             cmd.append(f"-DTBOX_SYSROOT={self.project.sysroot_path}")
 
+        # Per-service CMake cache variables (TBOX-SOMEIP-DSN-CR-006 §11.3):
+        # BUILD 提供受控构建开关（e.g. USE_REAL_IPC=ON / USE_MOCK_SOMEIP=OFF），
+        # 与 toolchain/sysroot 注入同等对待。
+        for key, value in service.build.cmake_cache_variables.items():
+            cmd.append(f"-D{key}={value}")
+
         return cmd
 
     def _build_cmd(self, service: Service) -> list[str]:
