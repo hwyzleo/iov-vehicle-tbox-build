@@ -75,7 +75,9 @@ dependencies:
         WITH_BROKER: "OFF"
         WITH_CLIENTS: "OFF"
         WITH_TESTS: "OFF"
-        WITH_DOCS: "OFF"
+        # 2.0.20 的文档选项名为 DOCUMENTATION（非 WITH_DOCS）；置 OFF 避免
+        # man/ 构建依赖 xsltproc 导致 configure 失败（CI 容器未安装 xsltproc）。
+        DOCUMENTATION: "OFF"
         WITH_SHARED_LIBRARIES: "OFF"
         WITH_STATIC_LIBRARIES: "ON"
         WITH_CJSON: "OFF"

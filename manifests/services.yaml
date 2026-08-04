@@ -171,3 +171,39 @@ services:
         - /var/lib/tbox
         - /var/tbox/mqtt
       capabilities: []
+
+  tsp:
+    description: "TBOX TSP service (CR-007: tbox_tsp daemon + tbox::tsp_client SDK)"
+    kind: service
+    source_dir: ../iov-vehicle-tbox-tsp
+    build:
+      preset: orin-release
+      targets:
+        - tbox_tsp
+        - tbox_tsp_client
+      # CR-007 §8: framework 是 library（无 unit）；TSP 消费 tbox::mqtt_client，
+      # PROV/SEC 仅由 MQTT 构建闭包带入，不登记为 TSP 直接 service dependency。
+      service_dependencies:
+        - framework
+        - mqtt
+      target_dependencies:
+        - nlohmann-json
+      install_components:
+        - name: tsp-sdk
+          staging: sdk
+        - name: tsp-runtime
+          staging: rootfs
+    runtime:
+      systemd_units:
+        - tbox-tsp.service
+      # TSP 在 MQTT 不可用时允许 DEGRADED 提供本地 IPC，不得自动生成 Requires=MQTT
+      after: []
+      health_check: tests/smoke/tsp-health.sh
+      smoke_test: tests/smoke/tsp-fota-relay.sh
+      config_paths:
+        - /etc/tbox/conf.d
+      # framework-store open("tsp", "/var/tbox") -> /var/tbox/tsp/
+      persistent_paths:
+        - /var/tbox
+      required_devices: []
+      capabilities: []

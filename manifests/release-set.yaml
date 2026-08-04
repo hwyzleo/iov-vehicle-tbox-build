@@ -45,3 +45,14 @@ release_sets:
       - prov
       - sec
       - mqtt
+
+  tbox-tsp-orin:
+    description: "Framework + PROV + SEC + MQTT + TSP Orin release set (TBOX-TSP-DSN-CR-007)"
+    platform: orin
+    profile: release
+    services:
+      - framework
+      - prov
+      - sec
+      - mqtt
+      - tsp
