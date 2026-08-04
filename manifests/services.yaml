@@ -138,3 +138,36 @@ services:
         - /var/tbox/sec
       required_devices: []
       capabilities: []
+
+  mqtt:
+    description: "TBOX MQTT service (CR-011: tbox_mqtt daemon + tbox::mqtt_client SDK)"
+    kind: service
+    source_dir: ../iov-vehicle-tbox-mqtt
+    build:
+      preset: orin-release
+      targets:
+        - tbox_mqtt_service
+        - tbox_mqtt_client
+      service_dependencies:
+        - framework
+        - prov
+        - sec
+      target_dependencies:
+        - mosquitto
+      install_components:
+        - name: mqtt-sdk
+          staging: sdk
+        - name: mqtt-runtime
+          staging: rootfs
+    runtime:
+      systemd_units:
+        - tbox-mqtt.service
+      after: []
+      health_check: tests/smoke/mqtt-health.sh
+      smoke_test: tests/smoke/mqtt-broker.sh
+      config_paths:
+        - /etc/tbox/conf.d
+      persistent_paths:
+        - /var/lib/tbox
+        - /var/tbox/mqtt
+      capabilities: []

@@ -236,12 +236,20 @@ class BuildOrchestrator:
         if self.config.is_orin:
             env["TBOX_SYSROOT"] = str(self.project.sysroot_path)
             env["TBOX_DEP_STAGING"] = str(self.staging.dep_staging)
-        # SDK staging: when a service has service_dependencies, point at the
-        # first dependency's SDK staging (single-SDK v0.1 simplification).
+        # SDK staging: inject ALL upstream service dependency SDK directories
+        # as a ':'-separated list (TBOX-MQTT-DSN-CR-011 §6.1). The toolchain
+        # processes TBOX_SDK_STAGING_DIRS and prepends each <dir>/usr to
+        # CMAKE_FIND_ROOT_PATH / CMAKE_PREFIX_PATH. We keep TBOX_SDK_STAGING
+        # (first dep) for backward compatibility.
         if service is not None and service.build.service_dependencies:
             first_dep = service.build.service_dependencies[0]
             sdk = self.staging.sdk_dir(first_dep)
             env["TBOX_SDK_STAGING"] = str(sdk)
+            sdk_dirs = [str(self.staging.sdk_dir(d)) for d in service.build.service_dependencies]
+            # 下游优先：声明顺序为 SEC→PROV→framework（第一个 dep 是 framework，
+            # 最后一个 dep 是 MQTT 的最下游上游），将列表反转以匹配设计顺序。
+            sdk_dirs.reverse()
+            env["TBOX_SDK_STAGING_DIRS"] = ":".join(sdk_dirs)
         return env
 
     # -- subprocess execution ---------------------------------------------

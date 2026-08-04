@@ -60,6 +60,27 @@ dependencies:
         BUILD_SHARED_LIBS: "OFF"
         BUILD_STATIC_LIBS: "ON"
 
+  mosquitto:
+    version: "2.0.20"
+    source:
+      url: "https://github.com/eclipse/mosquitto/archive/refs/tags/v2.0.20.tar.gz"
+      sha256: "851fb4b5bf5e2ddc4c341efcfe24c877fcb3a4356c79838103a44751c5731f6a"
+    license: EPL-2.0
+    boundary: TARGET
+    architecture: aarch64
+    linkage: static
+    patches: []
+    cmake:
+      options:
+        WITH_BROKER: "OFF"
+        WITH_CLIENTS: "OFF"
+        WITH_TESTS: "OFF"
+        WITH_DOCS: "OFF"
+        WITH_SHARED_LIBRARIES: "OFF"
+        WITH_STATIC_LIBRARIES: "ON"
+        WITH_CJSON: "OFF"
+        WITH_SRV: "OFF"
+
 cache:
   key_components:
     - platform_manifest_digest

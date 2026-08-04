@@ -84,6 +84,26 @@ elseif(DEFINED TBOX_DEP_STAGING AND NOT "${TBOX_DEP_STAGING}" STREQUAL "")
     list(PREPEND CMAKE_PREFIX_PATH "${TBOX_DEP_STAGING}/usr")
 endif()
 
+# --- Multi-SDK staging （TBOX-MQTT-DSN-CR-011 §6.1: 多级 SDk roots） ---
+# TBOX_SDK_STAGING_DIRS 是一个 ':' 分隔的路径列表（unix），用于注入多个
+# 上游 service dependency SDK。遍历每个 <dir>/usr，按声明顺序加入查找路径。
+# 设计 ordem：下游优先（SEC→PROV→framework），最先声明的最先搜索。
+if(DEFINED ENV{TBOX_SDK_STAGING_DIRS} AND NOT "$ENV{TBOX_SDK_STAGING_DIRS}" STREQUAL "")
+    string(REPLACE ":" ";" _tbox_sdk_dirs "$ENV{TBOX_SDK_STAGING_DIRS}")
+elseif(DEFINED TBOX_SDK_STAGING_DIRS AND NOT "${TBOX_SDK_STAGING_DIRS}" STREQUAL "")
+    set(_tbox_sdk_dirs "${TBOX_SDK_STAGING_DIRS}")
+else()
+    set(_tbox_sdk_dirs "")
+endif()
+foreach(_tbox_sdk_root IN LISTS _tbox_sdk_dirs)
+    if(IS_DIRECTORY "${_tbox_sdk_root}/usr")
+        list(PREPEND CMAKE_FIND_ROOT_PATH "${_tbox_sdk_root}/usr")
+        list(PREPEND CMAKE_PREFIX_PATH "${_tbox_sdk_root}/usr")
+    endif()
+endforeach()
+unset(_tbox_sdk_dirs)
+unset(_tbox_sdk_root)
+
 # --- Find mode ---
 # Programs (generators, code generators): search HOST paths only.
 # Libraries, headers, packages: search TARGET (sysroot/staging) only.
