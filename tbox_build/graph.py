@@ -110,6 +110,39 @@ class DependencyGraph:
             result.update(svc.build.target_dependencies)
         return result
 
+    def target_dependency_order(
+        self, service_ids: "Iterable[str] | None" = None
+    ) -> list[str]:
+        """Ordered TARGET dependencies for recipe pre-staging.
+
+        Unlike :meth:`target_dependency_set` (which returns an unordered set
+        that callers then sort alphabetically), this preserves a build-safe
+        order: services are visited in dependency-build order and each
+        service's ``target_dependencies`` are appended in their declared
+        order, de-duplicated on first occurrence.
+
+        Rationale: some TARGET deps depend on other TARGET deps at CMake
+        configure time (e.g. ``commonapi-someip`` calls
+        ``find_package(CommonAPI)`` and ``find_package(vsomeip3)``, so
+        ``commonapi-core`` and ``vsomeip`` must be staged first). A plain
+        alphabetical sort would build ``commonapi-someip`` before ``vsomeip``
+        and fail. The service manifest declares ``target_dependencies`` in a
+        valid build order, so honouring that declaration order (within the
+        service topological order) yields a correct recipe build sequence.
+        """
+        order = self.topological_sort(service_ids)
+        result: list[str] = []
+        seen: set[str] = set()
+        for sid in order:
+            svc = self._services.get(sid)
+            if svc is None:
+                continue
+            for dep in svc.build.target_dependencies:
+                if dep not in seen:
+                    seen.add(dep)
+                    result.append(dep)
+        return result
+
     def detect_cycles(self) -> list[list[str]]:
         """Detect cycles via DFS; return a list of cycles (each a path of IDs)."""
         WHITE, GRAY, BLACK = 0, 1, 2

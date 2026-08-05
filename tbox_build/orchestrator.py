@@ -242,6 +242,17 @@ class BuildOrchestrator:
         if self.config.is_orin:
             env["TBOX_SYSROOT"] = str(self.project.sysroot_path)
             env["TBOX_DEP_STAGING"] = str(self.staging.dep_staging)
+            # pkg-config reroot for staged TARGET deps (CR-006: someip consumes
+            # vsomeip3 / CommonAPI / CommonAPI-SomeIP via pkg_check_modules).
+            # Their installed .pc files carry prefix=/usr (DESTDIR install), so
+            # includedir/libdir resolve to the absolute /usr/... which does not
+            # exist on the build host. PKG_CONFIG_SYSROOT_DIR makes pkg-config
+            # prepend the dep-staging root to those absolute paths, so
+            # PkgConfig::COMMONAPI etc. point at <dep_staging>/usr/... . All
+            # someip pkg-config modules (and their Requires) live in the dep
+            # staging, so a single sysroot dir is correct here; CMake 3.16 does
+            # not derive this from CMAKE_SYSROOT automatically.
+            env["PKG_CONFIG_SYSROOT_DIR"] = str(self.staging.dep_staging)
         # SDK staging: inject ALL upstream service dependency SDK directories
         # as a ':'-separated list (TBOX-MQTT-DSN-CR-011 §6.1). The toolchain
         # processes TBOX_SDK_STAGING_DIRS and prepends each <dir>/usr to
@@ -308,6 +319,60 @@ class BuildOrchestrator:
 
     # -- recipe pre-staging -----------------------------------------------
 
+    def _stage_runtime_shared_deps(self, lock: Any) -> list[str]:
+        """Copy shared-linkage TARGET dependency runtime libs into install-root.
+
+        Static deps (yaml-cpp, curl, mosquitto, nlohmann) are linked into the
+        service binaries and need not be shipped. Shared deps (vsomeip,
+        CommonAPI, CommonAPI-SomeIP) are loaded at runtime and must be present
+        on the device, so their installed ``.so*`` files are copied from the
+        dependency staging (``deps/usr/lib``) into the rootfs payload
+        (``install-root/usr/lib``, on the default loader search path). Returns
+        the list of staged relative paths.
+        """
+        dep_usr = self.staging.dep_staging_usr()
+        install_usr = self.staging.install_root / "usr"
+        staged: list[str] = []
+        for name, entry in getattr(lock, "dependencies", {}).items():
+            if getattr(entry, "linkage", None) != "shared":
+                continue
+            marker = self.project.root / "dependencies" / "cache" / name / ".built"
+            installed: list[str] = []
+            if marker.is_file():
+                try:
+                    installed = json.loads(marker.read_text()).get("installed_files", [])
+                except (OSError, json.JSONDecodeError):
+                    installed = []
+            for rel in installed:
+                # runtime shared objects only: lib/*.so* excluding cmake/pkgconfig
+                if not rel.startswith("lib/"):
+                    continue
+                if rel.startswith("lib/cmake/") or rel.startswith("lib/pkgconfig/"):
+                    continue
+                base = rel.rsplit("/", 1)[-1]
+                if ".so" not in base:
+                    continue
+                src = dep_usr / rel
+                if not (src.exists() or src.is_symlink()):
+                    continue
+                dst = install_usr / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists() or dst.is_symlink():
+                    dst.unlink()
+                if src.is_symlink():
+                    # preserve the symlink (e.g. libvsomeip3.so -> .so.3.4.10)
+                    os.symlink(os.readlink(src), dst)
+                else:
+                    shutil.copy2(src, dst)
+                staged.append("usr/" + rel)
+        if staged:
+            libs = sorted({s.rsplit('/', 1)[-1] for s in staged})
+            print(f"  Staged {len(staged)} shared runtime lib file(s) into "
+                  f"install-root: {', '.join(libs)}")
+        return staged
+
+    # -- recipe pre-staging (target deps) ---------------------------------
+
     def _prepare_target_dependencies(
         self, graph: DependencyGraph, service_ids: list[str]
     ) -> list[str]:
@@ -316,8 +381,13 @@ class BuildOrchestrator:
         Returns the list of prepared dependency names. In dry-run mode the
         recipes are not executed; in release mode PENDING source checksums
         are rejected by the recipe executor.
+
+        Dependencies are prepared in a build-safe order (declared order within
+        service topological order), not alphabetically, so TARGET deps that
+        depend on other TARGET deps at configure time (e.g. commonapi-someip
+        needs commonapi-core and vsomeip staged first) build correctly.
         """
-        target_deps = sorted(graph.target_dependency_set(service_ids))
+        target_deps = graph.target_dependency_order(service_ids)
         if not target_deps:
             return []
 
@@ -532,6 +602,12 @@ class BuildOrchestrator:
 
             # 7. Artifact manifest (only if all checks passed)
             if report.status != "failed" and not self.config.dry_run:
+                # 6.5 Stage shared-linkage TARGET dependency runtime libraries
+                # into install-root so the package is self-contained on the
+                # device (the daemons resolve e.g. libvsomeip3.so / libCommonAPI*
+                # at runtime; these live in the dep staging, not the device).
+                self._stage_runtime_shared_deps(lock)
+
                 print("\n=== Generating artifact manifest ===")
                 artifact_manifest = self._generate_artifact_manifest(
                     service_manifest, lock, git_commit, report.service_results

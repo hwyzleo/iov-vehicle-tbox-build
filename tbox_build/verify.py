@@ -113,10 +113,63 @@ class Verifier:
             except Exception as exc:
                 result.add_check("path-conflicts", False, str(exc))
 
+        # 5. systemd ExecStart binaries are actually installed
+        #    Catches unit/binary name mismatches (e.g. ExecStart=/usr/bin/tbox-prov
+        #    while the installed daemon is /usr/bin/tbox_prov), which otherwise
+        #    only surface at deploy time as a service that exits 127.
+        missing = self._missing_execstart_binaries()
+        result.add_check(
+            "systemd-execstart",
+            not missing,
+            "All unit ExecStart binaries present"
+            if not missing
+            else "ExecStart target(s) not found in install-root: "
+            + "; ".join(f"{unit} -> {path}" for unit, path in missing),
+        )
+
         if result.status == "pending":
             result.status = "success"
 
         return result
+
+    def _missing_execstart_binaries(self) -> list[tuple[str, str]]:
+        """Return (unit_name, exec_path) for TBOX ExecStart targets that are
+        not present in the staging install-root.
+
+        Only ExecStart binaries whose basename begins with ``tbox`` are
+        checked; system tools (``/bin/sh``, ``/usr/bin/env`` ...) are provided
+        by the base image and intentionally excluded to avoid false positives.
+        """
+        root = self.staging.install_root
+        unit_dirs = [
+            root / "usr" / "lib" / "systemd" / "system",
+            root / "lib" / "systemd" / "system",
+            root / "etc" / "systemd" / "system",
+        ]
+        missing: list[tuple[str, str]] = []
+        for unit_dir in unit_dirs:
+            if not unit_dir.is_dir():
+                continue
+            for unit in sorted(unit_dir.glob("*.service")):
+                for raw in unit.read_text(encoding="utf-8", errors="replace").splitlines():
+                    line = raw.strip()
+                    if not line.startswith("ExecStart="):
+                        continue
+                    value = line[len("ExecStart="):].strip()
+                    # Strip systemd special prefixes (@, -, +, !, :) then take
+                    # the executable (first whitespace-separated token).
+                    value = value.lstrip("@-+!:")
+                    if not value:
+                        continue
+                    exec_path = value.split()[0]
+                    base = Path(exec_path).name
+                    if not base.startswith("tbox"):
+                        continue
+                    # Map an absolute on-target path to the staged install-root.
+                    staged = root / exec_path.lstrip("/")
+                    if not staged.exists():
+                        missing.append((unit.name, exec_path))
+        return missing
 
     def verify_package(self, package_path: Path) -> VerifyResult:
         """Verify a release package: checksum + structure."""

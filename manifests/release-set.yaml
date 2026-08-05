@@ -56,3 +56,15 @@ release_sets:
       - sec
       - mqtt
       - tsp
+
+  tbox-someip-orin:
+    description: "Framework + PROV + SEC + MQTT + TSP + SOMEIP Orin release set (TBOX-SOMEIP-DSN-CR-006)"
+    platform: orin
+    profile: release
+    services:
+      - framework
+      - prov
+      - sec
+      - mqtt
+      - tsp
+      - someip

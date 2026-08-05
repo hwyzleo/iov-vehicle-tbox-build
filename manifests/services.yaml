@@ -219,7 +219,7 @@ services:
     build:
       preset: orin-release
       targets:
-        - tbox-someip
+        - tbox_someip
       # CR-006 §11.3：BUILD 注入 SOMEIP 构建开关（受控输入）：
       #   USE_REAL_IPC=ON  -> 链接 tbox::tsp_client / tbox::prov_client（冻结 SDK）
       #   USE_MOCK_SOMEIP=OFF -> 真实 vsomeip/CommonAPI runtime（非 mock）

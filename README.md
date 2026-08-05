@@ -51,8 +51,15 @@ python3 -m tbox_build build --dry-run --set tbox-orin-minimal
 # Package (tar + artifact manifest)
 python3 -m tbox_build package --platform orin --profile release
 
-# Deploy (framework, dry-run by default)
-python3 -m tbox_build deploy <package.tar.gz> --dry-run
+# Deploy to an Orin device over SSH (DRY-RUN by default: prints the plan).
+#   Pipeline: pre-check -> upload(rsync) -> backup -> install -> ldconfig
+#             -> daemon-reload -> enable/restart (dependency order) -> smoke,
+#   with automatic rollback to the pre-deploy backup on failure.
+python3 -m tbox_build deploy <package.tar.gz> --host orin-car --user tbox -i ~/.ssh/id_orin
+# Perform the real deployment (add --execute):
+python3 -m tbox_build deploy <package.tar.gz> --host orin-car -i ~/.ssh/id_orin --execute
+# Roll back the device to a specific on-device backup:
+python3 -m tbox_build deploy <package.tar.gz> --host orin-car --rollback /var/tbox/backups/tbox-<stamp>.tar.gz
 
 # Verify staging or package
 python3 -m tbox_build verify

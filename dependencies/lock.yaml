@@ -94,10 +94,18 @@ dependencies:
   #   SHA-256 均 PENDING：下载受控源码后计算填充；release build 前必须完成。
   # ================================================================
   vsomeip:
-    version: "3.1.20.3"
+    version: "3.4.10"
     source:
-      url: "https://github.com/COVESA/vsomeip/archive/refs/tags/3.1.20.3.tar.gz"
-      sha256: "56ba4103e7e92ab2f5597d4fee9827f26698c30618faa5e74793a812a76f3c2c"
+      url: "https://github.com/COVESA/vsomeip/archive/refs/tags/3.4.10.tar.gz"
+      # 3.1.20.3 -> 3.4.10。原因链：
+      #  (1) commonapi-someip 3.2.3-r8 的 CMakeLists 要求 find_package(vsomeip3 3.2.0)，
+      #      3.1.20.x 不满足（vsomeip 无 3.2.x tag：3.1.37.1 直接跳到 3.3.0）。
+      #  (2) commonapi-someip 3.2.3-r8/master 的 ClientId.cpp 直接使用扁平结构
+      #      vsomeip_sec_client_t.{user,group,host}；vsomeip 3.3.0/3.3.8 曾把该结构
+      #      改成 union（.client.uds_client.*）导致编译失败，3.4.10 起又恢复为扁平结构。
+      #  (3) 3.4.10 与 capicxx-someip 3.2.3-r8 同为 2023-10 发布，是官方配套版本；
+      #      仍只需 Boost 1.55+/-std=c++14（适配 sysroot Boost 1.71.0 + gcc-9）。
+      sha256: "a7eacb5aab4ed9e4fc16cc37aab2fc1633ce8ca77e0d0665a76e34a4e6cd2639"
     license: MPL-2.0
     boundary: TARGET
     architecture: aarch64
@@ -105,9 +113,13 @@ dependencies:
     patches: []
     cmake:
       options:
-        # 选项名以 recipe 实装时 vsomeip 3.x CMake 事实为准（ENABLE_TEST/
-        # ENABLE_EXAMPLES/ENABLE_SIGNAL_HANDLING 等）；Boost 头文件需由
-        # recipe 提供（orin sysroot 仅含 Boost 运行时库，无 dev 头）。
+        # Boost dev（头文件 + 未带版本号 .so 软链 + libboost_system stub）已由
+        # orin-r35.3.1 sysroot 提供（Ubuntu focal libboost1.71-dev 1.71.0-6ubuntu6，
+        # 与 sysroot 运行时 Boost 1.71.0 同版本），find_package(Boost) 可解析。
+        # GTEST_ROOT=n/a：3.4.10 在未设 GTEST_ROOT 时会 FetchContent 联网 clone
+        # googletest（违反离线受控构建）；设为 "n/a" 后顶层跳过 FetchContent，
+        # 且 test/CMakeLists.txt 对 "n/a" 直接 return()，干净跳过测试、全程不联网。
+        GTEST_ROOT: "n/a"
         ENABLE_TEST: "OFF"
         ENABLE_EXAMPLES: "OFF"
 
@@ -121,9 +133,9 @@ dependencies:
     architecture: aarch64
     linkage: shared
     patches: []
-    # 注意：capicxx-core-runtime 使用 autotools（configure/make），非 CMake；
-    # 通用 recipe executor 当前仅支持 CMake-based 依赖（dependency.py），
-    # 非 CMake 构建步骤需 BUILD 配对 CR 扩展（通用缺口，非 SOMEIP 特有问题）。
+    # capicxx-core-runtime 3.2.3-r7 使用 CMake（顶层 CMakeLists.txt + cmake/），
+    # 由通用 recipe executor（dependency.py）直接构建；源码须预置于
+    # dependencies/cache/commonapi-core/（release 不做在线下载）。
 
   commonapi-someip:
     version: "3.2.3-r8"
@@ -135,8 +147,8 @@ dependencies:
     architecture: aarch64
     linkage: shared
     patches: []
-    # autotools 构建（同 commonapi-core）；需 vsomeip 与 core runtime 先行
-    # 进入 staging 并暴露 pkg-config/.pc。
+    # CMake 构建（顶层 CMakeLists.txt，同 commonapi-core）；需 vsomeip 与 core
+    # runtime 先行进入 staging 并暴露 pkg-config/.pc。
 
 cache:
   key_components:

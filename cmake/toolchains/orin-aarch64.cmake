@@ -58,16 +58,28 @@ set(CMAKE_SYSROOT "${_tbox_sysroot}")
 # Search order (CR-002): downstream SDK staging -> TARGET dependency staging
 # -> sysroot. Each is only prepended when the variable is defined AND
 # non-empty, to avoid an empty value collapsing to "/usr" (host pollution).
+#
+# IMPORTANT (CMake 3.16 + CMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY):
+# A find-root entry must be the DESTDIR *root* that CONTAINS /usr — i.e.
+# ${TBOX_*_STAGING}, NOT ${TBOX_*_STAGING}/usr. Recipes install with
+# DESTDIR=${TBOX_DEP_STAGING} and CMAKE_INSTALL_PREFIX=/usr, so package
+# configs land at ${TBOX_DEP_STAGING}/usr/lib/cmake/<pkg>/. Under ONLY mode,
+# CMake re-roots the /usr system prefix (and the absolute CMAKE_PREFIX_PATH
+# entry below, which sits under this root) onto each find-root. With the root
+# set to the DESTDIR, /usr re-roots to ${TBOX_DEP_STAGING}/usr and configs are
+# found; if the root were ${TBOX_DEP_STAGING}/usr, CMake 3.16 would search
+# ${TBOX_DEP_STAGING}/usr/usr/... and find_package(<pkg> CONFIG) would fail
+# (this is exactly the vsomeip/CommonAPI cross-compile discovery failure).
 set(CMAKE_FIND_ROOT_PATH "${CMAKE_SYSROOT}")
 if(DEFINED ENV{TBOX_SDK_STAGING} AND NOT "$ENV{TBOX_SDK_STAGING}" STREQUAL "")
-    list(PREPEND CMAKE_FIND_ROOT_PATH "$ENV{TBOX_SDK_STAGING}/usr")
+    list(PREPEND CMAKE_FIND_ROOT_PATH "$ENV{TBOX_SDK_STAGING}")
 elseif(DEFINED TBOX_SDK_STAGING AND NOT "${TBOX_SDK_STAGING}" STREQUAL "")
-    list(PREPEND CMAKE_FIND_ROOT_PATH "${TBOX_SDK_STAGING}/usr")
+    list(PREPEND CMAKE_FIND_ROOT_PATH "${TBOX_SDK_STAGING}")
 endif()
 if(DEFINED ENV{TBOX_DEP_STAGING} AND NOT "$ENV{TBOX_DEP_STAGING}" STREQUAL "")
-    list(PREPEND CMAKE_FIND_ROOT_PATH "$ENV{TBOX_DEP_STAGING}/usr")
+    list(PREPEND CMAKE_FIND_ROOT_PATH "$ENV{TBOX_DEP_STAGING}")
 elseif(DEFINED TBOX_DEP_STAGING AND NOT "${TBOX_DEP_STAGING}" STREQUAL "")
-    list(PREPEND CMAKE_FIND_ROOT_PATH "${TBOX_DEP_STAGING}/usr")
+    list(PREPEND CMAKE_FIND_ROOT_PATH "${TBOX_DEP_STAGING}")
 endif()
 
 # CMAKE_PREFIX_PATH mirrors the find-root order so find_package(CONFIG)
@@ -97,7 +109,9 @@ else()
 endif()
 foreach(_tbox_sdk_root IN LISTS _tbox_sdk_dirs)
     if(IS_DIRECTORY "${_tbox_sdk_root}/usr")
-        list(PREPEND CMAKE_FIND_ROOT_PATH "${_tbox_sdk_root}/usr")
+        # find-root = DESTDIR root (contains /usr); prefix-path = the /usr prefix
+        # (sits under the root, so it is searched as-is under PACKAGE=ONLY).
+        list(PREPEND CMAKE_FIND_ROOT_PATH "${_tbox_sdk_root}")
         list(PREPEND CMAKE_PREFIX_PATH "${_tbox_sdk_root}/usr")
     endif()
 endforeach()

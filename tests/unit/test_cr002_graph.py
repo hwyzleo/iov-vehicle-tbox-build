@@ -71,6 +71,39 @@ class TestTargetDependencySet:
         graph = DependencyGraph(manifest, _lock("yaml-cpp", "spdlog"))
         assert graph.target_dependency_set(["prov"]) == {"yaml-cpp", "spdlog"}
 
+    def test_target_dependency_order_preserves_declared_order(self):
+        # A dependency (commonapi-someip) that needs others (vsomeip,
+        # commonapi-core) at configure time is declared last; ordering must
+        # keep it after its prerequisites, unlike an alphabetical sort which
+        # would place commonapi-someip before vsomeip.
+        manifest = ServiceManifest(services={
+            "someip": _svc(
+                "someip",
+                target_deps=["vsomeip", "commonapi-core", "commonapi-someip"],
+            ),
+        })
+        graph = DependencyGraph(
+            manifest, _lock("vsomeip", "commonapi-core", "commonapi-someip")
+        )
+        order = graph.target_dependency_order(["someip"])
+        assert order == ["vsomeip", "commonapi-core", "commonapi-someip"]
+        # Alphabetical sort would be wrong (someip before vsomeip):
+        assert order != sorted(order)
+        assert order.index("vsomeip") < order.index("commonapi-someip")
+        assert order.index("commonapi-core") < order.index("commonapi-someip")
+
+    def test_target_dependency_order_dedup_across_services(self):
+        manifest = ServiceManifest(services={
+            "fw": _svc("fw", target_deps=["yaml-cpp"]),
+            "svc": _svc(
+                "svc", service_deps=["fw"], target_deps=["yaml-cpp", "curl"]
+            ),
+        })
+        graph = DependencyGraph(manifest, _lock("yaml-cpp", "curl"))
+        order = graph.target_dependency_order(["svc"])
+        # fw builds before svc; yaml-cpp appears once, first.
+        assert order == ["yaml-cpp", "curl"]
+
     def test_missing_target_dep_detected(self):
         manifest = ServiceManifest(services={
             "fw": _svc("fw", target_deps=["ghost"]),

@@ -4,10 +4,10 @@ sysroot:
   source: current-device-snapshot
   source_device: /dev/nvme0n1p1
   repository_path: sysroots/orin-r35.3.1
-  digest: c49cfec409f0cc524918aa007ebfffe19b5caebab9168f710e5ac555806f6985
+  digest: f2cd39cf5a8569b9a34a9e77a5982aab0d3a24ab5e6df8385f8695f71bcf1981
   file_manifest: sysroots/orin-r35.3.1.manifest.json
   import_status: verified
-  import_date: '2026-08-03T02:25:47+00:00'
+  import_date: '2026-08-04T12:53:53+00:00'
 architecture:
   elf_class: ELFCLASS64
   elf_machine: EM_AARCH64
@@ -16,10 +16,24 @@ key_libraries:
   glibc: 2.31
   libstdcxx: 6.0.28
   gcc: 9.4.0
+  boost: 1.71.0
   nvidia_driver: to-verify
   cuda: to-verify
+# 受控 dev 增补：设备快照仅含 Boost 1.71.0 运行时 .so，缺 dev 头/软链，
+# 导致 vsomeip 的 find_package(Boost) 无法解析。按方案A补入与运行时同版本的
+# Boost dev（不改变运行时 ABI）。任何此处内容变更都会改变 sysroot digest 并
+# 触发全量重建（与其他 sysroot 内容一致）。
+dev_additions:
+  boost:
+    version: 1.71.0
+    source: "Ubuntu 20.04 focal libboost1.71-dev / libboost-system1.71.0 (1.71.0-6ubuntu6, arm64)"
+    reason: "设备快照仅有 Boost 运行时库，缺 dev 头文件；vsomeip 构建需要"
+    added:
+      - "usr/include/boost/** (14012 headers)"
+      - "usr/lib/aarch64-linux-gnu + lib/aarch64-linux-gnu: libboost_{date_time,filesystem,iostreams,locale,thread}.so -> .so.1.71.0 软链"
+      - "libboost_system.so.1.71.0 (5688B, header-only stub) + .so 软链（满足 CMake 3.16 FindBoost 的 system 组件）"
 fixes_applied:
-  absolute_symlinks_rewritten: 84
+  absolute_symlinks_rewritten: 0
   pkgconfig_prefixes_fixed: 0
   cmake_config_prefixes_fixed: 0
 nvidia_boundary:

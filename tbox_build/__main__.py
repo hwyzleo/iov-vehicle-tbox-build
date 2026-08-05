@@ -177,14 +177,35 @@ def cmd_package(args: argparse.Namespace) -> int:
 def cmd_deploy(args: argparse.Namespace) -> int:
     """Deploy a package."""
     project = _get_project(args)
-    deployer = Deployer(project, target_host=args.host, target_user=args.user)
+    deployer = Deployer(
+        project,
+        target_host=args.host,
+        target_user=args.user,
+        identity=args.identity,
+        port=args.port,
+        use_sudo=not args.no_sudo,
+        ask_pass=args.ask_pass,
+        ask_sudo_pass=args.ask_sudo_pass,
+        rollback_on_failure=not args.no_rollback,
+    )
 
     package_path = Path(args.package)
-    report = deployer.deploy(package_path, dry_run=args.dry_run)
 
-    print(f"Deploy status: {report.status}")
+    if args.rollback:
+        report = deployer.rollback(args.rollback)
+    else:
+        # Dry-run by default; --execute performs the real deployment.
+        execute = args.execute and not args.dry_run
+        report = deployer.deploy(package_path, execute=execute)
+
+    print(f"Deploy status: {report.status}  (target: {report.target_host})")
     for step in report.steps:
-        print(f"  [{step.name}] {step.status}: {step.message}")
+        print(f"  [{step.name}] {step.status}"
+              + (f": {step.message}" if step.message else ""))
+        # In dry-run/plan mode, show the exact commands that would run.
+        if step.status == "planned":
+            for cmd in step.commands:
+                print(f"      $ {cmd}")
     if report.errors:
         print("Errors:")
         for err in report.errors:
@@ -359,12 +380,26 @@ def main(argv: list[str] | None = None) -> int:
     p_package.set_defaults(func=cmd_package)
 
     # deploy
-    p_deploy = subparsers.add_parser("deploy", help="Deploy a package")
+    p_deploy = subparsers.add_parser("deploy", help="Deploy a package to a device (dry-run by default)")
     _add_common_args(p_deploy)
     p_deploy.add_argument("package", help="Path to the package file")
-    p_deploy.add_argument("--host", default=None, help="Target device host")
-    p_deploy.add_argument("--user", default="tbox", help="Target SSH user")
-    p_deploy.add_argument("--dry-run", action="store_true", help="Dry-run mode")
+    p_deploy.add_argument("--host", default=None, help="Target device host/IP")
+    p_deploy.add_argument("--user", default="tbox", help="Target SSH user (default: tbox)")
+    p_deploy.add_argument("--identity", "-i", default=None, help="SSH private key path")
+    p_deploy.add_argument("--port", type=int, default=22, help="SSH port (default: 22)")
+    p_deploy.add_argument("--no-sudo", action="store_true", help="Do not prefix remote commands with sudo")
+    p_deploy.add_argument("--ask-pass", action="store_true",
+                          help="Prompt once for the SSH password/passphrase (reused via a multiplexed connection)")
+    p_deploy.add_argument("--ask-sudo-pass", action="store_true",
+                          help="Prompt once for the remote sudo password (fed to 'sudo -S' over stdin)")
+    p_deploy.add_argument("--no-rollback", action="store_true",
+                          help="Do not auto-rollback on failure; leave the deploy on the device for inspection")
+    p_deploy.add_argument("--execute", action="store_true",
+                          help="Perform the real deployment (default is dry-run plan only)")
+    p_deploy.add_argument("--dry-run", action="store_true",
+                          help="Force dry-run (print the command plan; overrides --execute)")
+    p_deploy.add_argument("--rollback", default=None, metavar="BACKUP",
+                          help="Roll back the device to the given on-device backup archive path")
     p_deploy.set_defaults(func=cmd_deploy)
 
     # verify
