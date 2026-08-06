@@ -61,3 +61,15 @@ class BuildFailure(TboxBuildError):
 
 class PackageError(TboxBuildError):
     """Packaging error."""
+
+
+class ConfigValidationError(TboxBuildError):
+    """Configuration validation failure (schema, secret, common source).
+
+    Holds structured findings so callers can report without leaking
+    matched secret values.
+    """
+
+    def __init__(self, message: str, details: list | None = None):
+        super().__init__(message)
+        self.details = details or []

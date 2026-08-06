@@ -97,7 +97,11 @@ services:
       health_check: tests/smoke/prov-health.sh
       smoke_test: tests/smoke/prov-ipc.sh
       config_paths:
-        - /etc/tbox/conf.d
+        - /etc/tbox/common.yaml
+        - /etc/tbox/conf.d/prov.yaml
+      config_validation:
+        target_path: /etc/tbox/conf.d/prov.yaml
+        default_source: config/prov.default.yaml
       persistent_paths:
         - /var/tbox/prov
       required_devices: []
@@ -112,6 +116,7 @@ services:
       targets:
         - tbox_sec
         - tbox_sec_client
+        - sec_config_checker
       service_dependencies:
         - framework
         - prov
@@ -133,7 +138,11 @@ services:
       health_check: tests/smoke/sec-health.sh
       smoke_test: tests/smoke/sec-security.sh
       config_paths:
-        - /etc/tbox/conf.d
+        - /etc/tbox/common.yaml
+        - /etc/tbox/conf.d/sec.yaml
+      config_validation:
+        target_path: /etc/tbox/conf.d/sec.yaml
+        default_source: config/sec.default.yaml
       persistent_paths:
         - /var/tbox/sec
       required_devices: []
@@ -166,7 +175,11 @@ services:
       health_check: tests/smoke/mqtt-health.sh
       smoke_test: tests/smoke/mqtt-broker.sh
       config_paths:
-        - /etc/tbox/conf.d
+        - /etc/tbox/common.yaml
+        - /etc/tbox/conf.d/mqtt.yaml
+      config_validation:
+        target_path: /etc/tbox/conf.d/mqtt.yaml
+        default_source: config/mqtt.default.yaml
       persistent_paths:
         - /var/lib/tbox
         - /var/tbox/mqtt
@@ -201,7 +214,11 @@ services:
       health_check: tests/smoke/tsp-health.sh
       smoke_test: tests/smoke/tsp-fota-relay.sh
       config_paths:
-        - /etc/tbox/conf.d
+        - /etc/tbox/common.yaml
+        - /etc/tbox/conf.d/tsp.yaml
+      config_validation:
+        target_path: /etc/tbox/conf.d/tsp.yaml
+        default_source: config/tsp.default.yaml
       # framework-store open("tsp", "/var/tbox") -> /var/tbox/tsp/
       persistent_paths:
         - /var/tbox
@@ -254,8 +271,12 @@ services:
       health_check: tests/smoke/someip-health.sh
       smoke_test: tests/smoke/someip-sd-smoke.sh
       config_paths:
-        - /etc/tbox/conf.d
-        - /etc/tbox/someip
+        - /etc/tbox/common.yaml
+        - /etc/tbox/conf.d/someip.yaml
+        - /etc/tbox/someip/vsomeip.json
+      config_validation:
+        target_path: /etc/tbox/conf.d/someip.yaml
+        default_source: config/someip.default.yaml
       persistent_paths: []
       required_devices: []
       capabilities: []

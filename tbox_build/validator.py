@@ -217,6 +217,65 @@ def validate_health_smoke(manifest: ServiceManifest, project_root: Path) -> None
         )
 
 
+def validate_config_validation(manifest: ServiceManifest) -> None:
+    """Cross-reference config_validation against config_paths (CR-003 §5).
+
+    Ensures ``config_validation.target_path`` is a member of the service's
+    declared ``runtime.config_paths``. Schema/default_source path escape is
+    checked at schema-check time (relative to the service source root).
+    """
+    violations: list[str] = []
+    for svc in manifest:
+        cv = svc.runtime.config_validation
+        if cv is None:
+            continue
+        if cv.target_path not in svc.runtime.config_paths:
+            violations.append(
+                f"Service '{svc.id}' config_validation.target_path "
+                f"'{cv.target_path}' must be a member of runtime.config_paths "
+                f"{svc.runtime.config_paths}"
+            )
+    if violations:
+        raise ValidationFailure(
+            f"config_validation cross-reference failed ({len(violations)} violation(s))",
+            violations,
+        )
+
+
+def validate_config_deployment_coverage(
+    manifest: ServiceManifest, project_root: Path
+) -> list[str]:
+    """Check config-deployment.yaml covers all service config_paths (CR-003 §7).
+
+    Every ``runtime.config_paths`` entry under ``/etc/tbox/**`` SHOULD be
+    matched by a rule in ``manifests/config-deployment.yaml``. Unmatched
+    paths default to ``preserve`` (§7.1), which may silently prevent
+    release-managed configs from being replaced on the device. This check
+    returns warnings (not errors) for unmatched paths so the operator is
+    alerted to potential deploy-policy gaps.
+    """
+    warnings: list[str] = []
+    try:
+        project = Project(project_root)
+        cdm = project.load_config_deployment_manifest()
+    except Exception:
+        # Not a valid project root or no config-deployment manifest; skip.
+        return warnings
+
+    for svc in manifest:
+        for cp in svc.runtime.config_paths:
+            if not cp.startswith("/etc/tbox/"):
+                continue
+            rule = cdm.match("orin", cp)
+            if rule is None:
+                warnings.append(
+                    f"Service '{svc.id}' config_path '{cp}' is not matched "
+                    f"by any rule in config-deployment.yaml (defaults to "
+                    f"preserve; add an explicit rule if it should be replaced)"
+                )
+    return warnings
+
+
 def validate_all(
     manifest: ServiceManifest, project_root: Path, lock: DependencyLock | None = None
 ) -> list[str]:
@@ -264,5 +323,11 @@ def validate_all(
 
     # 7. health/smoke script existence
     validate_health_smoke(manifest, project_root)
+
+    # 8. config_validation.target_path in config_paths (CR-003)
+    validate_config_validation(manifest)
+
+    # 9. config-deployment coverage of service config_paths (CR-003 §7)
+    warnings.extend(validate_config_deployment_coverage(manifest, project_root))
 
     return warnings

@@ -114,6 +114,31 @@ class TestDryRunBuild:
         assert saved["status"] == "success"
         assert saved["release_set"] == "tbox-orin-minimal"
 
+    def test_dry_run_full_release_set_someip_orin(self, project_root: Path):
+        """The full TBOX release set (tbox-someip-orin) builds in dry-run.
+
+        Verifies the complete dependency chain framework -> prov -> sec ->
+        mqtt -> tsp -> someip is ordered correctly and all 6 real services
+        (excluding the minimal example) are processed.
+        """
+        project = Project(project_root)
+        config = BuildConfig(platform="orin", profile="release", dry_run=True)
+        orch = BuildOrchestrator(project, config)
+        report = orch.build(set_id="tbox-someip-orin")
+
+        assert report.status == "success"
+        assert report.release_set == "tbox-someip-orin"
+        # 6 real services (no minimal example in this set)
+        assert len(report.service_results) == 6
+        ids = [sr.id for sr in report.service_results]
+        assert ids == ["framework", "prov", "sec", "mqtt", "tsp", "someip"]
+        # All services succeeded in dry-run
+        for sr in report.service_results:
+            assert sr.status == "success"
+        # SOMEIP has the controlled build switches injected
+        someip_result = next(sr for sr in report.service_results if sr.id == "someip")
+        assert someip_result.targets == ["tbox_someip"]
+
 
 class TestDryRunPackage:
     """Dry-run packaging (staging exists from dry-run build)."""

@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
 import subprocess
 import time
 from dataclasses import dataclass, field, asdict
@@ -33,9 +34,10 @@ from .manifest import (
     ServiceManifest,
     ReleaseSetManifest,
     InstallComponent,
+    ConfigDeploymentManifest,
 )
 from .schema import validate_service_manifest, validate_release_set_manifest
-from .staging import StagingDir
+from .staging import StagingDir, sha256_file
 from .validator import validate_all
 
 
@@ -130,6 +132,59 @@ class BuildReport:
 
 
 # ---------------------------------------------------------------------------
+# Platform config overlay report (CR-003 §6/§9)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OverlayFileEntry:
+    """A single file staged by the platform config overlay."""
+
+    source: str  # configs/<platform>/rootfs/<rel> (relative to project root)
+    target_path: str  # logical on-device path, e.g. /etc/tbox/common.yaml
+    rel_path: str  # relative to install-root, e.g. etc/tbox/common.yaml
+    mode: int
+    sha256: str
+    overwrote: bool  # whether a service default was overridden
+    prior_sha256: str | None = None
+    prior_owner: str | None = None
+    deploy_policy: str = "replace"
+    category: str = "release-managed"
+
+
+@dataclass
+class OverlayReport:
+    """Platform config overlay staging report (CR-003 §6 step 10)."""
+
+    platform: str
+    entries: list[OverlayFileEntry] = field(default_factory=list)
+    removed_stale: list[str] = field(default_factory=list)
+    unauthorized: list[str] = field(default_factory=list)
+    status: str = "success"  # success | failed
+    errors: list[str] = field(default_factory=list)
+    validation_summary: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "platform": self.platform,
+            "status": self.status,
+            "entries": [asdict(e) for e in self.entries],
+            "removed_stale": self.removed_stale,
+            "unauthorized": self.unauthorized,
+            "errors": self.errors,
+            "validation": self.validation_summary,
+        }
+
+    def to_json(self) -> str:
+        return json.dumps(self.to_dict(), indent=2)
+
+    def save(self, path: Path) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self.to_json())
+
+
+# ---------------------------------------------------------------------------
 # Build orchestrator
 # ---------------------------------------------------------------------------
 
@@ -141,6 +196,7 @@ class BuildOrchestrator:
         self.project = project
         self.config = config or BuildConfig()
         self.staging = StagingDir(project.root, self.config.platform, self.config.profile)
+        self._overlay_report: OverlayReport | None = None
 
     # -- manifest loading and validation ----------------------------------
 
@@ -371,7 +427,344 @@ class BuildOrchestrator:
                   f"install-root: {', '.join(libs)}")
         return staged
 
-    # -- recipe pre-staging (target deps) ---------------------------------
+    # -- platform device config overlay -----------------------------------
+
+    # -- platform device config overlay (CR-003 §6) ---------------------
+
+    _OVERLAY_REPORT_NAME = "platform-overlay-report.json"
+
+    def _overlay_report_path(self) -> Path:
+        return self.staging.manifests_dir / self._OVERLAY_REPORT_NAME
+
+    @staticmethod
+    def _is_safe_overlay_path(src: Path, rel: Path, overlay_root: Path) -> str | None:
+        """Return an error string if *src* is unsafe, else None (§6 step 2).
+
+        Rejects symlinks, absolute paths, ``..`` traversal, device/socket/fifo
+        files and symlink escape outside the overlay root.
+        """
+        rel_str = rel.as_posix()
+        if rel_str.startswith("/"):
+            return f"absolute path in overlay: {src}"
+        if ".." in rel.parts:
+            return f"'..' traversal in overlay: {src}"
+        if src.is_symlink():
+            return f"symlink in overlay (forbidden): {src}"
+        try:
+            mode = src.lstat().st_mode
+        except OSError as exc:
+            return f"cannot stat overlay file: {src} ({exc})"
+        if not stat.S_ISREG(mode):
+            return f"non-regular file in overlay: {src}"
+        # Symlink-escape guard: resolved real path must stay under overlay root.
+        try:
+            src.resolve().relative_to(overlay_root.resolve())
+        except ValueError:
+            return f"overlay path escapes root: {src}"
+        return None
+
+    def _load_previous_overlay_report(self) -> dict[str, Any] | None:
+        """Load the previous build's overlay report (for stale cleanup)."""
+        path = self._overlay_report_path()
+        if not path.is_file():
+            return None
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+
+    def _clean_stale_overlay(
+        self, prev: dict[str, Any], overlay_root: Path, report: OverlayReport
+    ) -> None:
+        """Remove files placed by the previous overlay but absent now (§6 step 3)."""
+        current_sources: set[str] = set()
+        if overlay_root.is_dir():
+            for src in overlay_root.rglob("*"):
+                if src.is_file() and not src.is_symlink():
+                    current_sources.add(src.relative_to(overlay_root).as_posix())
+        for entry in prev.get("entries", []):
+            rel_path = entry.get("rel_path", "")
+            if not rel_path:
+                continue
+            if rel_path in current_sources:
+                continue  # still present; will be re-staged
+            stale = self.staging.install_root / rel_path
+            if stale.is_file() or stale.is_symlink():
+                stale.unlink()
+                report.removed_stale.append(rel_path)
+
+    def _find_prior_owner(
+        self, dst: Path, service_results: list[ServiceResult]
+    ) -> str | None:
+        """Best-effort owner lookup for a pre-overlay install-root file."""
+        try:
+            rel = dst.relative_to(self.staging.install_root)
+        except ValueError:
+            return None
+        rel_str = rel.as_posix()
+        for result in service_results:
+            if rel_str in result.installed_files:
+                return result.id
+        return None
+
+    def _stage_platform_config_overlay(
+        self, service_manifest: ServiceManifest,
+        service_results: list[ServiceResult],
+    ) -> OverlayReport:
+        """Stage the platform config overlay into install-root (CR-003 §6).
+
+        Implements the 10-step overlay algorithm: normalize/validate the
+        platform root, build a safe file manifest, clean stale overlay state,
+        authorize each target via config-deployment.yaml, record prior
+        SHA-256/owner, write atomically with permission normalization, then
+        run schema/secret/common validation and emit an overlay report.
+        """
+        report = OverlayReport(platform=self.config.platform)
+        overlay_root = (
+            self.project.root / "configs" / self.config.platform / "rootfs"
+        )
+
+        # Step 1: normalize; absent root -> empty overlay (nothing to stage)
+        if not overlay_root.is_dir():
+            self._overlay_report = report
+            return report
+
+        # Step 3: clean stale files from the previous overlay (incremental)
+        prev = self._load_previous_overlay_report()
+        if prev is not None:
+            self._clean_stale_overlay(prev, overlay_root, report)
+
+        cdm = self.project.load_config_deployment_manifest()
+
+        # Steps 2, 4-8: validate, authorize, record, stage each file
+        for src in sorted(overlay_root.rglob("*")):
+            # Skip real directories (structure); everything else goes through
+            # path validation, which rejects symlinks and non-regular files.
+            if src.is_dir() and not src.is_symlink():
+                continue
+            rel = src.relative_to(overlay_root)
+
+            # Step 2: reject unsafe paths
+            err = self._is_safe_overlay_path(src, rel, overlay_root)
+            if err is not None:
+                report.status = "failed"
+                report.errors.append(err)
+                continue
+
+            rel_str = rel.as_posix()
+            target_logical = "/" + rel_str
+
+            # Step 5: authorization -- only release-managed targets allowed
+            rule = cdm.match(self.config.platform, target_logical)
+            if rule is None:
+                report.unauthorized.append(target_logical)
+                report.status = "failed"
+                report.errors.append(
+                    f"overlay target not declared in config-deployment.yaml: "
+                    f"{target_logical}"
+                )
+                continue
+            if rule.category != "release-managed":
+                report.unauthorized.append(target_logical)
+                report.status = "failed"
+                report.errors.append(
+                    f"overlay target is {rule.category} (must be "
+                    f"release-managed): {target_logical}"
+                )
+                continue
+
+            dst = self.staging.install_root / rel
+
+            # Step 6: record prior file (service default being overridden)
+            prior_sha: str | None = None
+            prior_owner: str | None = None
+            overwrote = False
+            if dst.is_file() and not dst.is_symlink():
+                prior_sha = sha256_file(dst)
+                prior_owner = self._find_prior_owner(dst, service_results)
+                overwrote = True
+
+            if self.config.dry_run:
+                report.entries.append(OverlayFileEntry(
+                    source=str(src.relative_to(self.project.root)),
+                    target_path=target_logical,
+                    rel_path=rel_str,
+                    mode=0o644,
+                    sha256="(dry-run)",
+                    overwrote=overwrote,
+                    prior_sha256=prior_sha,
+                    prior_owner=prior_owner,
+                    deploy_policy=rule.deploy_policy,
+                    category=rule.category,
+                ))
+                continue
+
+            # Step 7: temp file + permission normalization + atomic rename
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dst.with_name(dst.name + ".tmp")
+            shutil.copy2(src, tmp)
+            os.chmod(tmp, 0o644)
+            if dst.exists() or dst.is_symlink():
+                dst.unlink()
+            os.rename(tmp, dst)
+
+            # Step 8: record final entry
+            report.entries.append(OverlayFileEntry(
+                source=str(src.relative_to(self.project.root)),
+                target_path=target_logical,
+                rel_path=rel_str,
+                mode=0o644,
+                sha256=sha256_file(dst),
+                overwrote=overwrote,
+                prior_sha256=prior_sha,
+                prior_owner=prior_owner,
+                deploy_policy=rule.deploy_policy,
+                category=rule.category,
+            ))
+
+        # Step 9: schema / secret / common validation + permission normalize
+        if not self.config.dry_run:
+            from .config_validation import ConfigValidator
+            validator = ConfigValidator(
+                self.project.root,
+                self.staging.install_root,
+                self.config.platform,
+                service_manifest,
+            )
+            val_report = validator.validate()
+            validator.normalize_permissions(val_report)
+            report.validation_summary = {
+                "common_ok": val_report.common_ok,
+                "conf_d_ok": val_report.conf_d_ok,
+                "secret_scan_ruleset": val_report.secret_scan.ruleset_version,
+                "secret_findings": len(val_report.secret_scan.findings),
+                "schema_checks": [
+                    {"service": s.service_id, "status": s.status}
+                    for s in val_report.schema_checks
+                ],
+                "permission_normalizations": val_report.permission_normalizations,
+            }
+            if not val_report.passed:
+                report.status = "failed"
+                report.errors.extend(val_report.errors)
+                for f in val_report.secret_scan.findings:
+                    report.errors.append(
+                        f"secret {f.rule_id}: {f.file}"
+                        + (f" field={f.field_path}" if f.field_path else "")
+                    )
+                for sc in val_report.schema_checks:
+                    if sc.status == "fail":
+                        report.errors.append(
+                            f"schema check failed for '{sc.service_id}' "
+                            f"({sc.target_path}): {'; '.join(sc.errors)}"
+                        )
+
+        # Step 10: save overlay report
+        if not self.config.dry_run:
+            report.save(self._overlay_report_path())
+
+        staged = [e.target_path for e in report.entries]
+        if staged:
+            print(f"  Staged {len(staged)} {self.config.platform} platform "
+                  f"config overlay file(s): {', '.join(staged)}")
+        if report.removed_stale:
+            print(f"  Removed {len(report.removed_stale)} stale overlay "
+                  f"file(s): {', '.join(report.removed_stale)}")
+
+        self._overlay_report = report
+        return report
+
+    # -- BUILD-owned platform assets (§8.3) -----------------------------
+
+    _PLATFORM_ASSETS_DIR = "packaging/systemd"
+    _PLATFORM_UNIT_DIR_REL = "usr/lib/systemd/system"
+
+    def _stage_platform_assets(
+        self, service_manifest: ServiceManifest
+    ) -> list[str]:
+        """Stage BUILD-owned platform aggregation assets into install-root.
+
+        Copies release-set level assets that BUILD owns (e.g. ``tbox.target``)
+        from ``packaging/systemd/`` into the rootfs staging so they are
+        included in the release package. These assets express release-set
+        composition only and do not change single-service runtime semantics
+        (SPEC §8.3).
+
+        Only units whose ``Wants=`` references are present in the built
+        service set are staged; this keeps the target consistent with the
+        actual release-set contents.
+
+        Returns the list of staged relative paths.
+        """
+        assets_dir = self.project.root / self._PLATFORM_ASSETS_DIR
+        if not assets_dir.is_dir():
+            return []
+
+        # Determine which service units were actually built in this run.
+        built_units: set[str] = set()
+        for svc in service_manifest:
+            built_units.update(svc.runtime.systemd_units)
+
+        staged: list[str] = []
+        for src in sorted(assets_dir.iterdir()):
+            if not src.is_file() or src.is_symlink():
+                continue
+            # Only stage .target units for now (BUILD-owned aggregation).
+            # .service units are owned by individual services.
+            if src.suffix != ".target":
+                continue
+            # Filter the unit's Wants= to only include built service units.
+            content = src.read_text(encoding="utf-8")
+            filtered = self._filter_target_wants(content, built_units)
+            dst_dir = self.staging.install_root / self._PLATFORM_UNIT_DIR_REL
+            dst_dir.mkdir(parents=True, exist_ok=True)
+            dst = dst_dir / src.name
+            dst.write_text(filtered, encoding="utf-8")
+            os.chmod(dst, 0o644)
+            rel = f"{self._PLATFORM_UNIT_DIR_REL}/{src.name}"
+            staged.append(rel)
+            print(f"  Staged platform asset: {rel}")
+        return staged
+
+    @staticmethod
+    def _filter_target_wants(content: str, built_units: set[str]) -> str:
+        """Filter a .target unit's Wants=/After= to built service units only.
+
+        Keeps only the unit names that are present in *built_units* so the
+        staged target reflects the actual release-set contents. Preserves all
+        other lines (Description, Documentation, [Install], etc.).
+        """
+        lines = content.splitlines()
+        result: list[str] = []
+        skip_continuation = False
+        for line in lines:
+            stripped = line.strip()
+            # Handle multi-line values (continuation lines after Wants=/After=)
+            if skip_continuation:
+                unit = stripped.rstrip()
+                if unit in built_units:
+                    result.append(line)
+                # Stop skipping when we hit a non-indented line or empty line
+                if not line.startswith(" ") and not line.startswith("\t"):
+                    skip_continuation = False
+                    if stripped and not stripped.startswith("#"):
+                        result.append(line)
+                continue
+            if stripped.startswith("Wants=") or stripped.startswith("After="):
+                # Check if value is on the same line or on continuation lines
+                key, _, value = stripped.partition("=")
+                inline_units = [u.strip() for u in value.split() if u.strip()]
+                kept = [u for u in inline_units if u in built_units]
+                if kept:
+                    result.append(f"{key}=" + " ".join(kept))
+                else:
+                    result.append(f"{key}=")
+                # If no inline units, the value is on continuation lines
+                if not inline_units:
+                    skip_continuation = True
+            else:
+                result.append(line)
+        return "\n".join(result) + ("\n" if content.endswith("\n") else "")
 
     def _prepare_target_dependencies(
         self, graph: DependencyGraph, service_ids: list[str]
@@ -608,16 +1001,38 @@ class BuildOrchestrator:
                 # at runtime; these live in the dep staging, not the device).
                 self._stage_runtime_shared_deps(lock)
 
-                print("\n=== Generating artifact manifest ===")
-                artifact_manifest = self._generate_artifact_manifest(
-                    service_manifest, lock, git_commit, report.service_results
+                # 6.6 Stage platform-specific device config overlay
+                # (configs/<platform>/rootfs/**) into install-root, overriding
+                # the generic per-service config templates installed above
+                # (CR-003 §6). This is how Orin-specific device configs (e.g.
+                # SEC mqtt TLS profile, MQTT broker host, common.yaml) get
+                # packaged and deployed to the correct on-device paths
+                # (/etc/tbox/...). Whole-file overlay; no YAML deep merge.
+                overlay_report = self._stage_platform_config_overlay(
+                    service_manifest, report.service_results
                 )
-                manifest_path = self.staging.manifests_dir / "artifact-manifest.json"
-                artifact_manifest.save(manifest_path)
-                report.artifact_manifest_path = str(
-                    manifest_path.relative_to(self.project.root)
-                )
-                print(f"  {len(artifact_manifest.entries)} artifact(s) -> {manifest_path}")
+                if overlay_report.status == "failed":
+                    report.status = "failed"
+                    report.errors.extend(overlay_report.errors)
+                    # Skip artifact manifest; fall through to report save.
+                else:
+                    # 6.7 Stage BUILD-owned platform aggregation assets
+                    # (e.g. tbox.target) into install-root so the package
+                    # includes the release-set level systemd target (§8.3).
+                    # These assets express release-set composition only;
+                    # they do not change single-service runtime semantics.
+                    self._stage_platform_assets(service_manifest)
+
+                    print("\n=== Generating artifact manifest ===")
+                    artifact_manifest = self._generate_artifact_manifest(
+                        service_manifest, lock, git_commit, report.service_results
+                    )
+                    manifest_path = self.staging.manifests_dir / "artifact-manifest.json"
+                    artifact_manifest.save(manifest_path)
+                    report.artifact_manifest_path = str(
+                        manifest_path.relative_to(self.project.root)
+                    )
+                    print(f"  {len(artifact_manifest.entries)} artifact(s) -> {manifest_path}")
 
             if report.status != "failed":
                 report.status = "success"
@@ -674,17 +1089,25 @@ class BuildOrchestrator:
                 comp_name = comp.name if comp else "unknown"
                 comp_staging = comp.staging if comp else "rootfs"
                 if comp_staging == "sdk":
-                    # SDK components install into a per-service DESTDIR
-                    # (sdk/<service_id>), so ``path`` is relative to that
-                    # subdir. scan_files() walks the shared sdk_root (sdk/)
-                    # and emits rel paths like "<service_id>/<path>"; include
-                    # the service_id segment so the owner lookup key matches.
                     rel_key = f"sdk/{result.id}/{path}"
                 else:
                     rel_key = f"rootfs/{path}"
                 file_owners[rel_key] = (
                     result.id, target_str, "0.1.0", comp_name, comp_staging,
                 )
+
+        # Overlay provenance map: rootfs/<rel_path> -> OverlayFileEntry (CR-003 §9)
+        overlay_by_rel: dict[str, Any] = {}
+        if self._overlay_report is not None:
+            for entry in self._overlay_report.entries:
+                overlay_by_rel[f"rootfs/{entry.rel_path}"] = entry
+        # Schema-check status by service -> target_path
+        schema_status: dict[str, str] = {}
+        secret_ok = True
+        if self._overlay_report is not None:
+            for sc in self._overlay_report.validation_summary.get("schema_checks", []):
+                schema_status[sc.get("service", "")] = sc.get("status", "skipped")
+            secret_ok = self._overlay_report.validation_summary.get("secret_findings", 0) == 0
 
         for staged in self.staging.scan_files():
             owner_info = file_owners.get(staged.rel_path)
@@ -695,6 +1118,18 @@ class BuildOrchestrator:
                     "unknown", "unknown", "unknown", "unknown", "unknown",
                 )
             staged.owner_service = svc_id
+            ov = overlay_by_rel.get(staged.rel_path)
+            kw: dict[str, Any] = {}
+            if ov is not None:
+                kw.update(
+                    config_overlay_source=ov.source,
+                    config_prior_sha256=ov.prior_sha256,
+                    config_deploy_policy=ov.deploy_policy,
+                    config_category=ov.category,
+                    config_overlaid=ov.overwrote,
+                    config_schema_check=schema_status.get(svc_id) if svc_id != "unknown" else None,
+                    config_secret_scan="pass" if secret_ok else "fail",
+                )
             manifest.add_staged_file(
                 staged,
                 owner_service=svc_id,
@@ -703,6 +1138,7 @@ class BuildOrchestrator:
                 git_commit=git_commit,
                 install_component=component,
                 staging=staging,
+                **kw,
             )
 
         manifest.check_conflicts()

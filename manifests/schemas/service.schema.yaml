@@ -172,3 +172,24 @@ properties:
                 type: array
                 items:
                   type: string
+              # Per-service configuration validation entry (CR-003 §5).
+              # target_path must be a member of runtime.config_paths
+              # (enforced by the cross-reference validator).
+              config_validation:
+                type: object
+                required:
+                  - target_path
+                additionalProperties: false
+                properties:
+                  target_path:
+                    type: string
+                    minLength: 1
+                  schema:
+                    type: string
+                    minLength: 1
+                  default_source:
+                    type: string
+                    minLength: 1
+                  check_command:
+                    type: string
+                    minLength: 1

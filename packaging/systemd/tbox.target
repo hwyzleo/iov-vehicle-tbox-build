@@ -1,8 +1,29 @@
 [Unit]
 Description=TBOX Platform Aggregation Target (release-set level)
+Documentation=https://app.notion.com/p/TBOX-BUILD-SPEC-3af0ec7a4b928024b0b3c8a248916329
 # This unit aggregates all TBOX services in a release set.
 # It does not change single-service runtime semantics.
-# Individual services define their own unit files and dependencies.
+# Individual services define their own unit files and dependencies;
+# this target only expresses the release-set composition so that
+# `systemctl start tbox.target` brings up the full TBOX stack.
+#
+# Wants= (not Requires=) is used deliberately: a single service failure
+# must not prevent the rest of the stack from starting. Per-service
+# ordering and hard dependencies are declared in each .service unit.
+
+Wants=
+  tbox-prov.service
+  tbox-sec.service
+  tbox-mqtt.service
+  tbox-tsp.service
+  tbox-someip.service
+
+After=
+  tbox-prov.service
+  tbox-sec.service
+  tbox-mqtt.service
+  tbox-tsp.service
+  tbox-someip.service
 
 [Install]
 WantedBy=multi-user.target

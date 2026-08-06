@@ -1,0 +1,57 @@
+# TBOX Build Configuration Deployment Policy Manifest (BUILD CR-003 §7.1)
+#
+# 版本化部署策略清单：集中声明设备配置文件的覆盖策略，不再由各服务脚本
+# 自行实现（BUILD-REQ-041）。
+#
+# deploy_policy 枚举:
+#   replace          备份后覆盖，失败或回退时恢复（与二进制/unit 同 release-set）
+#   preserve         保留设备已有文件，发布流程不得静默覆盖
+#   create_if_missing 仅在目标不存在时初始化
+#
+# 匹配规则:
+#   - 精确 path 优先于 path_glob；同优先级多规则命中且策略不同则失败
+#   - 未匹配到规则的 /etc/tbox/** 文件默认 preserve，不得静默覆盖
+#   - release-managed 不得使用 provisioning 秘密路径
+#   - device-managed 文件不得由 package 声明 replace
+#   - 清单随 Artifact Manifest 记录版本和 SHA-256
+
+version: 1
+platforms:
+  orin:
+    files:
+      # --- release-managed: BUILD 平台配置，replace ---
+      - path: /etc/tbox/common.yaml
+        owner: build
+        category: release-managed
+        deploy_policy: replace
+
+      - path_glob: /etc/tbox/conf.d/*.yaml
+        owner: service
+        category: release-managed
+        deploy_policy: replace
+
+      # --- release-managed: SOME/IP 强耦合非 YAML 配置（vsomeip.json），replace ---
+      # vsomeip.json 与 someip.yaml 寻址字段由 CI gate D 校验一致；
+      # 随 someip-runtime 安装，deploy 时 replace（SPEC §8.6.7 强耦合例外）。
+      - path_glob: /etc/tbox/someip/**
+        owner: service
+        category: release-managed
+        deploy_policy: replace
+
+      # --- device-managed: provisioning 秘密与设备唯一值，preserve ---
+      - path_glob: /etc/tbox/credentials/**
+        owner: provisioning
+        category: device-managed
+        deploy_policy: preserve
+
+      - path: /etc/tbox/device.yaml
+        owner: provisioning
+        category: device-managed
+        deploy_policy: preserve
+
+      # --- device-managed: 设备本地配置，create_if_missing ---
+      # 设备首次部署时初始化空骨架，已存在则保留设备本地值。
+      - path: /etc/tbox/local.yaml
+        owner: provisioning
+        category: device-managed
+        deploy_policy: create_if_missing

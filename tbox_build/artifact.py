@@ -45,6 +45,14 @@ class ArtifactEntry:
     install_component: str = "unknown"
     staging: str = "unknown"
     elf_info: dict[str, Any] | None = None
+    # Config overlay provenance (CR-003 §9); populated for config files only.
+    config_overlay_source: str | None = None
+    config_prior_sha256: str | None = None
+    config_deploy_policy: str | None = None
+    config_category: str | None = None
+    config_overlaid: bool | None = None
+    config_schema_check: str | None = None
+    config_secret_scan: str | None = None
 
 
 class ArtifactManifest:
@@ -89,6 +97,13 @@ class ArtifactManifest:
         git_commit: str,
         install_component: str = "unknown",
         staging: str = "unknown",
+        config_overlay_source: str | None = None,
+        config_prior_sha256: str | None = None,
+        config_deploy_policy: str | None = None,
+        config_category: str | None = None,
+        config_overlaid: bool | None = None,
+        config_schema_check: str | None = None,
+        config_secret_scan: str | None = None,
     ) -> None:
         """Add a staged file to the manifest, classifying and inspecting it."""
         cls = classify_file(staged.full_path)
@@ -109,6 +124,13 @@ class ArtifactManifest:
             install_component=install_component,
             staging=staging,
             elf_info=elf_info,
+            config_overlay_source=config_overlay_source,
+            config_prior_sha256=config_prior_sha256,
+            config_deploy_policy=config_deploy_policy,
+            config_category=config_category,
+            config_overlaid=config_overlaid,
+            config_schema_check=config_schema_check,
+            config_secret_scan=config_secret_scan,
         )
         self.add_entry(entry)
 

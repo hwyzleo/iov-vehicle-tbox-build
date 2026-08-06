@@ -1,0 +1,21 @@
+# TBOX Common Configuration - Orin 平台正式发布来源（BUILD CR-003 §4.1）
+#
+# 正式 /etc/tbox/common.yaml 的唯一来源。各服务 conf.d/*.yaml 禁止内联顶层
+# common:；common 配置全部由此文件提供。
+#
+# framework-config 分层：本文件（/etc/tbox/common.yaml）-> conf.d/<svc>.yaml
+#
+# 决策说明（store.root）：原 mqtt.yaml 使用 /var/lib/tbox（framework 默认），
+# sec.yaml 使用 /var/tbox。单一 common 来源要求统一；prov/sec/tsp 均使用
+# /var/tbox（framework-store 标准），故统一为 /var/tbox。mqtt 的 store 数据
+# 落点由 /var/lib/tbox/mqtt/ 变为 /var/tbox/mqtt/（后者已在 mqtt
+# persistent_paths 中）。如需保留 /var/lib/tbox，由 mqtt 服务侧另立 CR。
+
+common:
+  store:
+    root: "/var/tbox"
+  log:
+    level: "info"
+    file:
+      enabled: true
+      root: "/var/log/tbox"

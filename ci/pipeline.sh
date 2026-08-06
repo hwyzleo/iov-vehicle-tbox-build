@@ -19,6 +19,10 @@
 #                        - tbox-orin-minimal   (hello-lib + hello-cli, self-test)
 #                        - tbox-framework-orin (framework only)
 #                        - tbox-prov-orin      (framework + prov)
+#                        - tbox-sec-orin       (framework + prov + sec)
+#                        - tbox-mqtt-orin      (framework + prov + sec + mqtt)
+#                        - tbox-tsp-orin       (framework + prov + sec + mqtt + tsp)
+#                        - tbox-someip-orin    (full TBOX stack: + someip)
 #   --service <id>     Build/package a single service instead of a set
 #                      (mutually exclusive with --set; deps built automatically).
 #   --platform <p>     Target platform (default: orin).

@@ -67,6 +67,23 @@ class BuildConfig:
 
 
 @dataclass
+class ConfigValidation:
+    """Service-declared configuration validation entry (CR-003 §5).
+
+    Either ``schema`` (a JSON Schema path relative to the service source
+    root) or ``check_command`` (a controlled command) is declared. The
+    ``target_path`` is the on-device path the service reads; it must be a
+    member of ``runtime.config_paths``. ``default_source`` is the service
+    default template path (relative to the service source root).
+    """
+
+    target_path: str
+    schema: str | None = None
+    default_source: str | None = None
+    check_command: str | None = None
+
+
+@dataclass
 class RuntimeConfig:
     """Runtime configuration for a single service."""
 
@@ -78,6 +95,7 @@ class RuntimeConfig:
     persistent_paths: list[str] = field(default_factory=list)
     required_devices: list[str] = field(default_factory=list)
     capabilities: list[str] = field(default_factory=list)
+    config_validation: ConfigValidation | None = None
 
 
 @dataclass
@@ -120,6 +138,56 @@ class ServiceManifest:
 
     def __iter__(self):
         return iter(self.services.values())
+
+
+@dataclass
+class ConfigDeployRule:
+    """A single deployment-policy rule from config-deployment.yaml (CR-003 §7.1).
+
+    Exactly one of ``path`` (exact) or ``path_glob`` is set. Exact paths take
+    priority over globs when matching.
+    """
+
+    owner: str
+    category: str  # release-managed | device-managed
+    deploy_policy: str  # replace | preserve | create_if_missing
+    path: str | None = None
+    path_glob: str | None = None
+
+
+@dataclass
+class ConfigDeploymentManifest:
+    """Versioned configuration deployment policy manifest (CR-003 §7)."""
+
+    version: int
+    platforms: dict[str, list[ConfigDeployRule]]
+
+    def rules_for(self, platform: str) -> list[ConfigDeployRule]:
+        return self.platforms.get(platform, [])
+
+    def match(self, platform: str, target_path: str) -> ConfigDeployRule | None:
+        """Return the highest-priority matching rule for *target_path*.
+
+        Exact ``path`` rules take priority over ``path_glob`` rules. If two
+        rules of the same priority match with different policies, that is a
+        conflict handled by the caller (this method returns the first match
+        within a priority tier for determinism).
+        """
+        import re as _re
+        exact: list[ConfigDeployRule] = []
+        globs: list[ConfigDeployRule] = []
+        for rule in self.rules_for(platform):
+            if rule.path is not None:
+                if rule.path == target_path:
+                    exact.append(rule)
+            elif rule.path_glob is not None:
+                if _glob_match(rule.path_glob, target_path):
+                    globs.append(rule)
+        if exact:
+            return exact[0]
+        if globs:
+            return globs[0]
+        return None
 
 
 @dataclass
@@ -299,6 +367,33 @@ class DependencyLock:
 # ---------------------------------------------------------------------------
 
 
+def _glob_match(pattern: str, path: str) -> bool:
+    """Match a glob pattern against an absolute posix path.
+
+    ``**`` matches any sequence including ``/``; ``*`` matches any sequence
+    except ``/``; ``?`` matches a single non-``/`` character.
+    """
+    import re as _re
+    i = 0
+    parts: list[str] = []
+    while i < len(pattern):
+        c = pattern[i]
+        if c == "*":
+            if i + 1 < len(pattern) and pattern[i + 1] == "*":
+                parts.append(".*")
+                i += 2
+            else:
+                parts.append("[^/]*")
+                i += 1
+        elif c == "?":
+            parts.append("[^/]")
+            i += 1
+        else:
+            parts.append(_re.escape(c))
+            i += 1
+    return _re.match("^" + "".join(parts) + "$", path) is not None
+
+
 def load_yaml(path: Path) -> dict[str, Any]:
     """Load a YAML file and return its contents as a dict."""
     try:
@@ -425,6 +520,42 @@ def _ensure_unique(items: list[str], label: str) -> None:
         seen.add(item)
 
 
+def _parse_config_validation(data: dict[str, Any]) -> ConfigValidation | None:
+    """Parse runtime.config_validation (CR-003 §5).
+
+    Requires ``target_path``; at least one of ``schema`` or ``check_command``
+    is expected (the latter may be absent if the schema is the only check).
+    """
+    if not isinstance(data, dict) or not data:
+        return None
+    target_path = data.get("target_path")
+    if not target_path or not isinstance(target_path, str):
+        raise SchemaValidationError(
+            "config_validation.target_path is required and must be a non-empty string"
+        )
+    schema = data.get("schema")
+    check_command = data.get("check_command")
+    default_source = data.get("default_source")
+    if schema is not None and not isinstance(schema, str):
+        raise SchemaValidationError("config_validation.schema must be a string path")
+    if check_command is not None and not isinstance(check_command, str):
+        raise SchemaValidationError("config_validation.check_command must be a string")
+    if default_source is not None and not isinstance(default_source, str):
+        raise SchemaValidationError("config_validation.default_source must be a string")
+    if schema is None and check_command is None:
+        # CR-003 §5 prefers a schema or check_command, but service-owned
+        # schemas are not yet created (§12). Accept target_path +
+        # default_source alone; run_schema_check skips gracefully until a
+        # schema/check_command is declared.
+        pass
+    return ConfigValidation(
+        target_path=str(target_path),
+        schema=str(schema) if schema else None,
+        default_source=str(default_source) if default_source else None,
+        check_command=str(check_command) if check_command else None,
+    )
+
+
 def _parse_runtime_config(data: dict[str, Any]) -> RuntimeConfig:
     return RuntimeConfig(
         systemd_units=list(data.get("systemd_units", [])),
@@ -435,6 +566,7 @@ def _parse_runtime_config(data: dict[str, Any]) -> RuntimeConfig:
         persistent_paths=list(data.get("persistent_paths", [])),
         required_devices=list(data.get("required_devices", [])),
         capabilities=list(data.get("capabilities", [])),
+        config_validation=_parse_config_validation(data.get("config_validation", {})),
     )
 
 
@@ -581,6 +713,41 @@ def load_dependency_lock(path: Path) -> DependencyLock:
     return DependencyLock(dependencies=deps, cache=cache)
 
 
+def load_config_deployment_manifest(path: Path) -> ConfigDeploymentManifest:
+    """Load and parse the config-deployment policy manifest (CR-003 §7)."""
+    data = load_yaml(path)
+    version = int(data.get("version", 1))
+    platforms: dict[str, list[ConfigDeployRule]] = {}
+    for plat, pdata in (data.get("platforms", {}) or {}).items():
+        rules: list[ConfigDeployRule] = []
+        for entry in (pdata.get("files", []) or []):
+            path_val = entry.get("path")
+            glob_val = entry.get("path_glob")
+            if not path_val and not glob_val:
+                raise SchemaValidationError(
+                    "config-deployment rule must declare 'path' or 'path_glob'"
+                )
+            policy = entry.get("deploy_policy", "")
+            if policy not in ("replace", "preserve", "create_if_missing"):
+                raise SchemaValidationError(
+                    f"config-deployment rule has invalid deploy_policy '{policy}'"
+                )
+            category = entry.get("category", "")
+            if category not in ("release-managed", "device-managed"):
+                raise SchemaValidationError(
+                    f"config-deployment rule has invalid category '{category}'"
+                )
+            rules.append(ConfigDeployRule(
+                owner=entry.get("owner", ""),
+                category=category,
+                deploy_policy=policy,
+                path=path_val,
+                path_glob=glob_val,
+            ))
+        platforms[plat] = rules
+    return ConfigDeploymentManifest(version=version, platforms=platforms)
+
+
 # ---------------------------------------------------------------------------
 # Project layout helper
 # ---------------------------------------------------------------------------
@@ -635,6 +802,10 @@ class Project:
         return self.manifests_dir / "release-set.yaml"
 
     @property
+    def config_deployment_manifest_path(self) -> Path:
+        return self.manifests_dir / "config-deployment.yaml"
+
+    @property
     def dependencies_dir(self) -> Path:
         return self.root / "dependencies"
 
@@ -687,6 +858,13 @@ class Project:
 
     def load_release_set_manifest(self) -> ReleaseSetManifest:
         return load_release_set_manifest(self.release_set_manifest_path)
+
+    def load_config_deployment_manifest(self) -> ConfigDeploymentManifest:
+        """Load the config-deployment manifest; returns empty if absent."""
+        path = self.config_deployment_manifest_path
+        if not path.is_file():
+            return ConfigDeploymentManifest(version=1, platforms={})
+        return load_config_deployment_manifest(path)
 
     def staging_dir(self, platform: str = "orin", profile: str = "release") -> Path:
         return self.out_dir / platform / profile
