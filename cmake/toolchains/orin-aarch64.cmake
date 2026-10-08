@@ -150,6 +150,44 @@ if(NOT DEFINED CMAKE_CXX_FLAGS_INIT)
     set(CMAKE_CXX_FLAGS_INIT "${TBOX_ORIN_CXX_FLAGS_INIT}")
 endif()
 
+# --- BUILD-provided CMake modules ---
+# 使服务仓库可以直接 include(TboxLinkHardening) 等 BUILD 公共模块。
+# 不注入时 D2 的 per-target 豁免机制在服务侧完全不可用（CR-004 评审 P1-3）。
+get_filename_component(_tbox_cmake_modules
+    "${CMAKE_CURRENT_LIST_DIR}/../modules" ABSOLUTE)
+if(IS_DIRECTORY "${_tbox_cmake_modules}")
+    list(APPEND CMAKE_MODULE_PATH "${_tbox_cmake_modules}")
+    list(REMOVE_DUPLICATES CMAKE_MODULE_PATH)
+endif()
+
+# --- Link-time undefined-symbol hardening (CR-004 D2, BUILD-REQ-046) ---
+# Centrally controlled -Wl,--no-undefined (equivalently -Wl,-z,defs) policy
+# applied to shared-library, module and executable linker initialization.
+#
+# Rollout decision (CR-004 §5.2): the mechanism ships DEFAULT OFF. It SHALL
+# NOT become default-on until ALL of the following evidence exists:
+#   1. a complete non-dry-run tbox-someip-orin release-set build;
+#   2. an inventory of every target affected by --no-undefined;
+#   3. a disposition for each failure (fixed dependency declaration, target
+#      redesign, or approved exemption in manifests/link-exemptions.yaml);
+#   4. design-review approval of the proposed default change.
+# Per-target exemptions use tbox_link_hardening_exempt(<target>) from
+# cmake/modules/TboxLinkHardening.cmake and MUST be recorded in
+# manifests/link-exemptions.yaml; repository-wide silent overrides are
+# forbidden (CR-004 §5.4). --as-needed / RELRO / -z now are NOT bundled here;
+# they carry distinct compatibility/security semantics (CR-004 §5.5).
+option(TBOX_LINK_HARDENING
+    "Reject undefined symbols at final link of EXECUTABLE/SHARED/MODULE targets"
+    OFF)
+# CMake re-reads the toolchain file during compiler testing; guard the flag
+# injection so each *_LINKER_FLAGS_INIT is touched exactly once.
+if(TBOX_LINK_HARDENING AND NOT _TBOX_LINK_HARDENING_APPLIED)
+    set(_TBOX_LINK_HARDENING_APPLIED TRUE)
+    string(APPEND CMAKE_SHARED_LINKER_FLAGS_INIT " -Wl,--no-undefined")
+    string(APPEND CMAKE_MODULE_LINKER_FLAGS_INIT " -Wl,--no-undefined")
+    string(APPEND CMAKE_EXE_LINKER_FLAGS_INIT " -Wl,--no-undefined")
+endif()
+
 # --- RPATH policy ---
 # Build-tree RPATH is allowed during development but MUST be stripped
 # from release artifacts. The orchestrator runs elfcheck to enforce this.
@@ -171,3 +209,4 @@ message(STATUS "  Find root path:   ${CMAKE_FIND_ROOT_PATH}")
 message(STATUS "  Prefix path:      ${CMAKE_PREFIX_PATH}")
 message(STATUS "  C standard:       ${CMAKE_C_STANDARD}")
 message(STATUS "  C++ standard:     ${CMAKE_CXX_STANDARD}")
+message(STATUS "  Link hardening:   ${TBOX_LINK_HARDENING} (-Wl,--no-undefined, CR-004 D2)")

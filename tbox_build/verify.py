@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Any
 
-from .elfcheck import check_staging, assert_clean, ElfCheckResult
+from .elfcheck import check_staging, check_symbol_integrity_staging
 from .errors import TboxBuildError
 from .staging import StagingDir, sha256_file
 
@@ -127,10 +127,75 @@ class Verifier:
             + "; ".join(f"{unit} -> {path}" for unit, path in missing),
         )
 
+        # 6. ELF symbol-integrity gate (CR-004 D4, BUILD-REQ-048)
+        #    Verifies that undefined dynamic symbols in every staged ELF are
+        #    satisfiable by its transitive DT_NEEDED closure, resolved from the
+        #    controlled roots in BUILD precedence: SDK staging -> TARGET
+        #    dependency staging -> sysroot. Strong unresolved symbols and
+        #    missing release dependencies fail; weak undefs are diagnostics.
+        try:
+            roots = self._symbol_roots()
+            sym_results = check_symbol_integrity_staging(
+                self.staging.install_root,
+                roots=roots,
+                missing_library_policy="error",
+                exempt_consumers=self._link_exempt_consumers(),
+            )
+            sym_violations = sum(len(r.violations) for r in sym_results)
+            sym_warnings = sum(len(r.warnings) for r in sym_results)
+            result.add_check(
+                "elf-symbol-integrity",
+                sym_violations == 0,
+                f"{len(sym_results)} ELF(s) checked, "
+                f"{sym_violations} violation(s), {sym_warnings} warning(s) "
+                f"(roots: {len(roots)})",
+            )
+            if sym_violations:
+                for r in sym_results:
+                    for v in r.violations:
+                        result.errors.append(v)
+        except Exception as exc:
+            result.add_check("elf-symbol-integrity", False, str(exc))
+
         if result.status == "pending":
             result.status = "success"
 
         return result
+
+    def _symbol_roots(self) -> list[Path]:
+        """Controlled roots for symbol resolution (CR-004 §7.2).
+
+        Precedence: the composed staging set (install-root) -> SDK staging
+        dirs -> TARGET dependency staging -> sysroot, matching the CMake
+        find-root order (SPEC §5.4).
+        """
+        from .manifest import Project
+        project = Project(self.staging.project_root)
+        roots: list[Path] = [self.staging.install_root]
+        if self.staging.sdk_root.is_dir():
+            roots.extend(sorted(p for p in self.staging.sdk_root.iterdir() if p.is_dir()))
+        roots.append(self.staging.dep_staging)
+        roots.append(project.sysroot_path)
+        return roots
+
+    def _link_exempt_consumers(self) -> frozenset[str]:
+        """Basenames of consumers covered by reviewed D2/D4 exemptions.
+
+        A CMake target ``tbox_prov`` maps to a staged artifact whose basename
+        equals the target (``tbox_prov``) or its first dotted component
+        (``tbox_prov.so``). Exempted consumers have their strong-unresolved
+        findings downgraded to warnings (D4 staging corroboration, CR-004 §7.4).
+        """
+        from .manifest import Project
+        project = Project(self.staging.project_root)
+        exemptions = project.load_link_exemptions()
+        if exemptions is None:
+            return frozenset()
+        names: set[str] = set()
+        for ex in exemptions.exemptions:
+            names.add(ex.target)
+            names.add(ex.target.split(".")[0])
+        return frozenset(names)
 
     def _missing_execstart_binaries(self) -> list[tuple[str, str]]:
         """Return (unit_name, exec_path) for TBOX ExecStart targets that are

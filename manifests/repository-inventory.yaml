@@ -1,0 +1,40 @@
+# TBOX Build Repository Inventory (CR-004 D1)
+#
+# 权威发布契约仓库清单：validate 时对比 manifests/services.yaml 的登记状态。
+# 只对本清单声明的仓库做严格覆盖判定；兄弟目录 iov-vehicle-tbox-* 的自动
+# 发现仅为诊断性 warning，绝不扩展发布契约（CR-004 §4.2）。
+#
+# coverage_allowlist 条目必须包含 owner、reason 以及 expires/review_by 之一；
+# 过期条目直接导致校验失败（BUILD-REQ-045）。
+
+version: 1
+repositories:
+  tbox-hello-lib:
+    path: examples/minimal
+    description: "Built-in minimal example library (BUILD v0.1-alpha self-verification)"
+  tbox-hello-cli:
+    path: examples/minimal
+    description: "Built-in minimal example CLI (BUILD v0.1-alpha self-verification)"
+  framework:
+    path: ../iov-vehicle-tbox-framework
+    description: "TBOX framework public library"
+  prov:
+    path: ../iov-vehicle-tbox-prov
+    description: "TBOX provisioning service"
+  sec:
+    path: ../iov-vehicle-tbox-sec
+    description: "TBOX security service"
+  diag:
+    path: ../iov-vehicle-tbox-diag
+    description: "TBOX diagnostic service (UDS/DoIP)"
+  mqtt:
+    path: ../iov-vehicle-tbox-mqtt
+    description: "TBOX MQTT service"
+  tsp:
+    path: ../iov-vehicle-tbox-tsp
+    description: "TBOX TSP service"
+  someip:
+    path: ../iov-vehicle-tbox-someip
+    description: "TBOX SOME/IP service"
+
+coverage_allowlist: []

@@ -27,7 +27,11 @@ from pathlib import Path
 from typing import Any
 
 from .errors import TboxBuildError
-from .manifest import Project, ConfigDeploymentManifest
+from .manifest import (
+    Project,
+    ConfigDeploymentManifest,
+    RetirementManifest,
+)
 from .graph import DependencyGraph
 from .staging import sha256_file
 
@@ -200,6 +204,64 @@ class ConfigDeployPlanner:
         return plan
 
 
+# ---------------------------------------------------------------------------
+# Deployment retirement planner (CR-004 D3, BUILD-REQ-047)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RetireAction:
+    """A single retirement declaration (unit or path)."""
+
+    unit: str | None = None
+    path: str | None = None
+    owner: str = ""
+    reason: str = ""
+
+
+@dataclass
+class RetirePlan:
+    """Aggregated retirement plan for one platform."""
+
+    platform: str
+    units: list[RetireAction] = field(default_factory=list)
+    paths: list[RetireAction] = field(default_factory=list)
+
+    @property
+    def empty(self) -> bool:
+        return not self.units and not self.paths
+
+    def summary(self) -> str:
+        return f"{len(self.units)} unit(s), {len(self.paths)} path(s)"
+
+
+class RetirePlanner:
+    """Computes the retirement plan from manifests/retirement.yaml (CR-004 §6.1).
+
+    Retirement is platform/release-set history owned by BUILD; the manifest
+    is validated before deployment (active-unit conflicts, unsafe paths,
+    protected-path intersections are rejected by the validator).
+    """
+
+    def __init__(self, rm: RetirementManifest, platform: str):
+        self.rm = rm
+        self.platform = platform
+
+    def plan(self) -> RetirePlan:
+        rp = self.rm.platform_for(self.platform)
+        return RetirePlan(
+            platform=self.platform,
+            units=[
+                RetireAction(unit=u.name, owner=u.owner, reason=u.reason)
+                for u in rp.retired_units
+            ],
+            paths=[
+                RetireAction(path=p.path, owner=p.owner, reason=p.reason)
+                for p in rp.retired_paths
+            ],
+        )
+
+
 class Deployer:
     """Deploys a release package to a target device over SSH."""
 
@@ -234,6 +296,8 @@ class Deployer:
         self.staging_platform = platform
         self._units: list[str] = []
         self._config_plan: ConfigDeployPlan | None = None
+        self._retire_plan: RetirePlan | None = None
+        self._retired_unit_states: dict[str, tuple[bool, bool]] = {}
         self._control_path: str | None = None
         self._sudo_pw: str | None = None
         self._stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -348,6 +412,81 @@ class Deployer:
             step.status = "success"
         return step
 
+    # -- retirement remote scripts (CR-004 D3; 评审 P0-1 / P0-2) ----------
+    #
+    # 两条铁律：
+    #   1. unit / path 必须在远端 shell 侧 quote。外层 shlex.quote 只保护本地
+    #      shell，远端仍会重新解析；未 quote 时清单里的 `;` 或 `$(...)` 会在
+    #      sudo 下变成额外命令。
+    #   2. 不得使用 `|| true`。幂等由 `if` 守卫表达（目标不存在 -> rc 0），
+    #      真实失败必须保留非 0 rc，否则 retire 永远不会失败、回滚不可达。
+
+    @staticmethod
+    def _retire_unit_script(unit: str) -> str:
+        """disable+stop a retired unit; missing unit is a successful no-op."""
+        q = shlex.quote(unit)
+        return f"if systemctl cat {q} >/dev/null 2>&1; then systemctl disable --now {q}; fi"
+
+    @staticmethod
+    def _retire_unit_probe_script(unit: str) -> str:
+        """Report a retired unit's prior enabled/active state (never fails)."""
+        q = shlex.quote(unit)
+        return (
+            f"printf '%s %s\\n' "
+            f"\"$(systemctl is-enabled {q} 2>/dev/null || true)\" "
+            f"\"$(systemctl is-active {q} 2>/dev/null || true)\""
+        )
+
+    @staticmethod
+    def _retire_path_script(path: str) -> str:
+        """Remove a retired path if present; missing path is a no-op."""
+        q = shlex.quote(path)
+        return f"if [ -e {q} ]; then rm -rf -- {q}; fi"
+
+    def _run_retire(self, step: DeployStep) -> DeployStep:
+        """Execute the retire step (CR-004 §6.3 step 4).
+
+        For each retired unit: capture enabled/active state (kept for
+        rollback), then ``systemctl disable --now`` (missing unit is a
+        successful no-op). For each retired path: remove it only if present
+        (guarded by ``[ -e ]``; already removed paths are no-ops, so a second
+        successful deployment produces no destructive delta). Commands and
+        results are recorded in the step message. A genuine failure
+        (permission denied, read-only filesystem, systemctl error) propagates
+        a non-zero rc and fails the step so the caller can roll back.
+        """
+        start = time.time()
+        plan = self._retire_plan or RetirePlan(platform=self.staging_platform)
+        lines: list[str] = []
+        failed = False
+        states: dict[str, tuple[bool, bool]] = {}
+        for act in plan.units:
+            _, probe = self._run(self._ssh_str(self._sudo_sh(
+                self._retire_unit_probe_script(act.unit))))
+            fields = probe.strip().split()
+            enabled = bool(fields) and fields[0] == "enabled"
+            active = len(fields) > 1 and fields[1] == "active"
+            states[act.unit] = (enabled, active)
+            rc, out = self._run(self._ssh_str(self._sudo_sh(
+                self._retire_unit_script(act.unit))))
+            lines.append(f"unit {act.unit}: enabled={enabled} active={active} "
+                         f"disable_now_rc={rc}")
+            if rc != 0:
+                failed = True
+                lines.append(f"unit {act.unit}: FAILED {out.strip()[:200]}")
+        for act in plan.paths:
+            rc, out = self._run(self._ssh_str(self._sudo_sh(
+                self._retire_path_script(act.path))))
+            lines.append(f"path {act.path}: remove_rc={rc}")
+            if rc != 0:
+                failed = True
+                lines.append(f"path {act.path}: FAILED {out.strip()[:200]}")
+        self._retired_unit_states = states
+        step.duration_seconds = time.time() - start
+        step.status = "failed" if failed else "success"
+        step.message = "; ".join(lines) if lines else "no retirements declared"
+        return step
+
     # -- restart order ----------------------------------------------------
 
     def _ordered_units(self, payload_root: Path) -> list[str]:
@@ -397,6 +536,26 @@ class Deployer:
         config_plan = planner.plan(payload_root)
         self._config_plan = config_plan
 
+        # Compute the retirement plan (CR-004 D3 §6.3).
+        rm = self.project.load_retirement_manifest()
+        self._retire_plan = RetirePlanner(rm, self.staging_platform).plan() \
+            if rm is not None else RetirePlan(platform=self.staging_platform)
+        retire_plan = self._retire_plan
+
+        # Backup extras: retired unit fragment paths (device-resolved so a
+        # rollback can restore the unit file) and retired paths (guarded by
+        # existence so missing targets are successful no-ops).
+        backup_extras: list[str] = []
+        for act in retire_plan.units:
+            backup_extras.append(
+                f"$(systemctl show -p FragmentPath --value "
+                f"{shlex.quote(act.unit)} 2>/dev/null)"
+            )
+        for act in retire_plan.paths:
+            q = shlex.quote(act.path)
+            backup_extras.append(f"$(test -e {q} && echo {q})")
+        extra_str = (" " + " ".join(backup_extras)) if backup_extras else ""
+
         steps.append(DeployStep("upload", commands=[
             " ".join(shlex.quote(c) for c in
                      self._ssh_cmd(f"mkdir -p {self.remote_stage}/rootfs")),
@@ -408,6 +567,7 @@ class Deployer:
                 f"mkdir -p /var/tbox/backups && "
                 f"tar -C / -czf {self.backup_path} "
                 f"$(cd {self.remote_stage}/rootfs && find . -type f -o -type l | sed 's#^\\./##') "
+                f"{extra_str} "
                 f"2>/dev/null || true"))),
         ]))
         # config-plan: report the create/replace/preserve decisions (no remote
@@ -417,6 +577,34 @@ class Deployer:
         for act in config_plan.actions:
             steps[-1].commands.append(
                 f"# {act.target_path}: {act.action} ({act.reason})")
+        # retire (CR-004 D3 §6.3): after backup, before install. Captures each
+        # retired unit's enabled/active state, disables/stops it, and removes
+        # only paths approved by the validated manifest. Missing units/paths
+        # are successful no-ops (idempotence). Dry-run prints the exact
+        # systemctl / removal commands without touching the device.
+        retire_cmds: list[str] = []
+        if not retire_plan.empty:
+            for act in retire_plan.units:
+                retire_cmds.append(
+                    f"# retire unit {act.unit} (owner={act.owner}, "
+                    f"reason={act.reason})"
+                )
+                retire_cmds.append(" ".join(shlex.quote(c) for c in self._ssh_cmd(
+                    self._sudo_sh(self._retire_unit_probe_script(act.unit)))))
+                retire_cmds.append(" ".join(shlex.quote(c) for c in self._ssh_cmd(
+                    self._sudo_sh(self._retire_unit_script(act.unit)))))
+            for act in retire_plan.paths:
+                retire_cmds.append(
+                    f"# retire path {act.path} (owner={act.owner}, "
+                    f"reason={act.reason})"
+                )
+                retire_cmds.append(" ".join(shlex.quote(c) for c in self._ssh_cmd(
+                    self._sudo_sh(self._retire_path_script(act.path)))))
+        steps.append(DeployStep(
+            "retire", commands=retire_cmds,
+            message=(f"{retire_plan.summary()} (dry-run: commands listed)"
+                     if retire_cmds else "no retirements declared"),
+        ))
         # install: base rsync excludes etc/tbox/** so configs are policy-driven
         steps.append(DeployStep("install", commands=[
             " ".join(shlex.quote(c) for c in self._ssh_cmd(
@@ -621,6 +809,18 @@ class Deployer:
                         step.status = "success"
                         report.steps.append(step)
                         continue
+                    if step.name == "retire":
+                        # Structured retirement execution (CR-004 D3).
+                        step = self._run_retire(step)
+                        report.steps.append(step)
+                        if step.status == "failed":
+                            report.status = "failed"
+                            report.errors.append(f"retire: {step.message}")
+                            if self.rollback_on_failure and backed_up:
+                                report.steps.append(self._rollback())
+                            report.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                            return report
+                        continue
                     start = time.time()
                     failed = False
                     for cmd in step.commands:
@@ -639,9 +839,11 @@ class Deployer:
                         report.status = "failed"
                         report.errors.append(f"{step.name}: {step.message}")
                         if (self.rollback_on_failure and backed_up
-                                and step.name in ("install", "config-install",
+                                and step.name in ("retire", "install",
+                                                  "config-install",
                                                   "ldconfig",
-                                                  "daemon-reload", "restart")):
+                                                  "daemon-reload",
+                                                  "restart")):
                             report.steps.append(self._rollback())
                         report.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                         return report
@@ -655,9 +857,29 @@ class Deployer:
     def _rollback(self) -> DeployStep:
         step = DeployStep(name="rollback")
         start = time.time()
+        script = (
+            f"tar -C / -xzf {self.backup_path} && "
+            f"ldconfig && systemctl daemon-reload"
+        )
+        # Restore each retired unit's prior enablement / running state
+        # (CR-004 §6.4): the backup archive contains the unit fragment (via
+        # FragmentPath capture) and the pre-retire state is recorded on the
+        # Deployer during the retire step.
+        restore: list[str] = []
+        for unit, (enabled, active) in sorted(self._retired_unit_states.items()):
+            q = shlex.quote(unit)
+            restore.append(
+                f"systemctl {'enable' if enabled else 'disable'} {q} "
+                f"2>/dev/null || true"
+            )
+            restore.append(
+                f"systemctl {'start' if active else 'stop'} {q} "
+                f"2>/dev/null || true"
+            )
+        if restore:
+            script += " && " + " && ".join(restore)
         cmds = [
-            self._ssh_cmd(self._sudo_sh(
-                f"tar -C / -xzf {self.backup_path} && ldconfig && systemctl daemon-reload")),
+            self._ssh_cmd(self._sudo_sh(script)),
         ]
         step.commands = [" ".join(shlex.quote(c) for c in cmds[0])]
         rc, out = self._run(step.commands[0])

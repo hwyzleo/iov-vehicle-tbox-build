@@ -36,6 +36,16 @@ release_sets:
       - prov
       - sec
 
+  tbox-diag-orin:
+    description: "Framework + PROV + SEC + DIAG Orin release set (DIAG 正式发布链路补齐)"
+    platform: orin
+    profile: release
+    services:
+      - framework
+      - prov
+      - sec
+      - diag
+
   tbox-mqtt-orin:
     description: "Framework + PROV + SEC + MQTT Orin release set (TBOX-MQTT-DSN-CR-011)"
     platform: orin
@@ -58,13 +68,14 @@ release_sets:
       - tsp
 
   tbox-someip-orin:
-    description: "Framework + PROV + SEC + MQTT + TSP + SOMEIP Orin release set (TBOX-SOMEIP-DSN-CR-006)"
+    description: "Framework + PROV + SEC + DIAG + MQTT + TSP + SOMEIP Orin release set (full TBOX stack)"
     platform: orin
     profile: release
     services:
       - framework
       - prov
       - sec
+      - diag
       - mqtt
       - tsp
       - someip

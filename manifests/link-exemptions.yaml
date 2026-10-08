@@ -1,0 +1,11 @@
+# TBOX Build Link-Hardening Exemptions (CR-004 D2 §5.4)
+#
+# 结构化豁免记录：仅允许对具名 target 豁免 -Wl,--no-undefined 策略，且必须
+# 记录 target、owner、reason、symbol_class、risk、scope、removal_condition
+# （BUILD-REQ-046）。禁止仓库级静默覆盖。
+#
+# 当前为空：TBOX_LINK_HARDENING 默认关闭，任何默认开启提案必须先提供完整
+# 非 dry-run tbox-someip-orin 构建证据与受影响目标处置（CR-004 §5.2）。
+
+version: 1
+exemptions: []

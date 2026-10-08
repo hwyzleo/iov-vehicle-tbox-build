@@ -22,9 +22,15 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .manifest import Project
-from .schema import validate_service_manifest, validate_release_set_manifest
-from .manifest import load_yaml
+from .manifest import Project, load_yaml
+from .schema import (
+    validate_service_manifest,
+    validate_release_set_manifest,
+    validate_dependency_lock,
+    validate_repository_inventory,
+    validate_retirement_manifest_schema,
+    validate_link_exemptions_schema,
+)
 from .validator import validate_all
 from .graph import DependencyGraph
 from .orchestrator import BuildOrchestrator, BuildConfig
@@ -68,6 +74,43 @@ def cmd_validate(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"  [FAIL] Release-set manifest schema: {exc}")
         return 1
+
+    try:
+        validate_dependency_lock(load_yaml(project.dependency_lock_path), project.root)
+        print(f"  [PASS] Dependency lock schema validation")
+    except Exception as exc:
+        print(f"  [FAIL] Dependency lock schema: {exc}")
+        return 1
+
+    # CR-004 manifests: repository inventory (D1), retirement (D3),
+    # link-hardening exemptions (D2 evidence).
+    if project.repository_inventory_path.is_file():
+        try:
+            validate_repository_inventory(
+                load_yaml(project.repository_inventory_path), project.root
+            )
+            print(f"  [PASS] Repository inventory schema validation")
+        except Exception as exc:
+            print(f"  [FAIL] Repository inventory schema: {exc}")
+            return 1
+    if project.retirement_manifest_path.is_file():
+        try:
+            validate_retirement_manifest_schema(
+                load_yaml(project.retirement_manifest_path), project.root
+            )
+            print(f"  [PASS] Retirement manifest schema validation")
+        except Exception as exc:
+            print(f"  [FAIL] Retirement manifest schema: {exc}")
+            return 1
+    if project.link_exemptions_path.is_file():
+        try:
+            validate_link_exemptions_schema(
+                load_yaml(project.link_exemptions_path), project.root
+            )
+            print(f"  [PASS] Link-exemptions schema validation")
+        except Exception as exc:
+            print(f"  [FAIL] Link-exemptions schema: {exc}")
+            return 1
 
     # Load and cross-reference validation
     service_manifest = project.load_service_manifest()
@@ -122,6 +165,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         jobs=args.jobs,
         clean=args.clean,
         dry_run=args.dry_run,
+        link_hardening=getattr(args, "link_hardening", False),
     )
     orch = BuildOrchestrator(project, config)
 
@@ -368,6 +412,11 @@ def main(argv: list[str] | None = None) -> int:
     p_build.add_argument("--jobs", "-j", type=int, default=1, help="Parallel jobs")
     p_build.add_argument("--clean", action="store_true", help="Clean build")
     p_build.add_argument("--dry-run", action="store_true", help="Print commands without executing")
+    p_build.add_argument(
+        "--link-hardening", action="store_true",
+        help="Enable -Wl,--no-undefined at final link (CR-004 D2; default off "
+             "until a full non-dry-run tbox-someip-orin build and exemption "
+             "registration are complete)")
     p_build.set_defaults(func=cmd_build)
 
     # package

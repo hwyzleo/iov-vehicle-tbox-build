@@ -148,6 +148,54 @@ services:
       required_devices: []
       capabilities: []
 
+  # DIAG service entry: 补齐 DIAG 的正式发布链路。
+  # 此前 DIAG 未登记 service，也未声明 install component，BUILD 无法把
+  # tbox_diag / tbox-diag.service / conf.d/diag.yaml staging 进 rootfs，
+  # 设备只能沿用遗留单体产物 /opt/tbox/bin/diag（+ /opt/tbox/lib/libhwyz.so），
+  # 该产物不由任何现行 install 规则生成。
+  diag:
+    description: "TBOX diagnostic service (UDS/DoIP server; routes to PROV/SEC)"
+    kind: service
+    source_dir: ../iov-vehicle-tbox-diag
+    build:
+      preset: orin-release
+      targets:
+        - TboxDiagService
+        - tbox_diag_client
+      # DIAG 启动时经 framework-ipc 连接 PROV 与 SEC，且链接 tbox::prov_client /
+      # tbox::sec_client（冻结 release-set SDK）；framework 是 library（无 unit）。
+      service_dependencies:
+        - framework
+        - prov
+        - sec
+      target_dependencies:
+        - nlohmann-json
+      install_components:
+        - name: diag-sdk
+          staging: sdk
+        - name: diag-runtime
+          staging: rootfs
+    runtime:
+      systemd_units:
+        - tbox-diag.service
+      # main.cpp 中 prov_client->connect() / sec_client->connect() 失败即 return 1，
+      # 故登记真实启动顺序依赖。
+      after:
+        - tbox-prov.service
+        - tbox-sec.service
+      health_check: tests/smoke/diag-health.sh
+      smoke_test: tests/smoke/diag-ipc.sh
+      config_paths:
+        - /etc/tbox/common.yaml
+        - /etc/tbox/conf.d/diag.yaml
+      config_validation:
+        target_path: /etc/tbox/conf.d/diag.yaml
+        default_source: config/diag.default.yaml
+      persistent_paths:
+        - /var/tbox
+      required_devices: []
+      capabilities: []
+
   mqtt:
     description: "TBOX MQTT service (CR-011: tbox_mqtt daemon + tbox::mqtt_client SDK)"
     kind: service

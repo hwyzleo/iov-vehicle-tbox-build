@@ -43,13 +43,35 @@ ET_CORE = 4  # core dump
 PT_INTERP = 3
 
 SHT_DYNAMIC = 6
+SHT_DYNSYM = 11
+
+SHT_GNU_VERSYM = 0x6FFFFFFF
+SHT_GNU_VERDEF = 0x6FFFFFFD
+SHT_GNU_VERNEED = 0x6FFFFFFE
 
 DT_NULL = 0
 DT_NEEDED = 1
+DT_SONAME = 14
 DT_STRTAB = 5
 DT_RPATH = 15
 DT_RUNPATH = 29
 DT_STRSZ = 10
+
+# Symbol binding (ELF64_ST_BIND)
+STB_GLOBAL = 1
+STB_WEAK = 2
+
+# Symbol types (ELF64_ST_TYPE)
+STT_NOTYPE = 0
+STT_OBJECT = 1
+STT_FUNC = 2
+STT_SECTION = 3
+STT_FILE = 4
+STT_GNU_IFUNC = 10
+
+# Version index semantics (versym)
+VER_NDX_LOCAL = 0
+VER_NDX_GLOBAL = 1
 
 _MACHINE_NAMES: dict[int, str] = {
     0: "EM_NONE",
@@ -105,6 +127,7 @@ class ElfInfo:
     needed: list[str] = field(default_factory=list)
     rpath: list[str] = field(default_factory=list)
     runpath: list[str] = field(default_factory=list)
+    soname: str | None = None
 
     @property
     def machine_name(self) -> str:
@@ -248,8 +271,12 @@ def _parse_program_headers(
     return None
 
 
-def _parse_dynamic_section(data: bytes, hdr: dict) -> tuple[list[str], list[str], list[str]]:
-    """Parse .dynamic section. Returns (needed, rpath, runpath)."""
+def _parse_sections(data: bytes, hdr: dict) -> list[dict]:
+    """Parse all section headers. Returns a list of section dicts.
+
+    Each dict carries ``name`` (offset into .shstrtab), ``type``, ``offset``,
+    ``size``, ``link``, ``info``, ``flags``, ``addralign``, ``entsize``.
+    """
     fmt = hdr["fmt"]
     is64 = hdr["is64"]
     shoff = hdr["e_shoff"]
@@ -257,22 +284,14 @@ def _parse_dynamic_section(data: bytes, hdr: dict) -> tuple[list[str], list[str]
     shentsize = hdr["e_shentsize"]
 
     if shoff == 0 or shnum == 0:
-        return [], [], []
+        return []
 
-    # Parse section headers to find SHT_DYNAMIC and its linked string table
     if is64:
         sh_fmt = fmt + "IIQQQQIIQQ"
         sh_size = 64
     else:
         sh_fmt = fmt + "IIIIIIIIII"
         sh_size = 40
-
-    dynamic_offset = 0
-    dynamic_size = 0
-    dynamic_link = 0  # section index of .dynstr
-
-    dynstr_offset = 0
-    dynstr_size = 0
 
     sections = []
     for i in range(shnum):
@@ -288,12 +307,36 @@ def _parse_dynamic_section(data: bytes, hdr: dict) -> tuple[list[str], list[str]
         sections.append({
             "name": sh_name,
             "type": sh_type,
+            "flags": sh_flags,
+            "addr": sh_addr,
             "offset": sh_offset,
             "size": sh_size_val,
             "link": sh_link,
+            "info": sh_info,
+            "addralign": sh_addralign,
+            "entsize": sh_entsize,
         })
+    return sections
+
+
+def _read_strtab(data: bytes, str_offset: int) -> str:
+    """Read a NUL-terminated string from a string table buffer."""
+    end = data.find(b"\x00", str_offset)
+    if end < 0:
+        end = len(data)
+    return data[str_offset:end].decode("utf-8", errors="replace")
+
+
+def _parse_dynamic_section(data: bytes, hdr: dict) -> tuple[list[str], list[str], list[str], str | None]:
+    """Parse .dynamic section. Returns (needed, rpath, runpath, soname)."""
+    fmt = hdr["fmt"]
+    is64 = hdr["is64"]
+    sections = _parse_sections(data, hdr)
 
     # Find SHT_DYNAMIC
+    dynamic_offset = 0
+    dynamic_size = 0
+    dynamic_link = 0  # section index of .dynstr
     for sec in sections:
         if sec["type"] == SHT_DYNAMIC:
             dynamic_offset = sec["offset"]
@@ -302,9 +345,11 @@ def _parse_dynamic_section(data: bytes, hdr: dict) -> tuple[list[str], list[str]
             break
 
     if dynamic_offset == 0 or dynamic_size == 0:
-        return [], [], []
+        return [], [], [], None
 
     # Find the linked string table (.dynstr)
+    dynstr_offset = 0
+    dynstr_size = 0
     if 0 < dynamic_link < len(sections):
         dynstr_section = sections[dynamic_link]
         dynstr_offset = dynstr_section["offset"]
@@ -312,19 +357,13 @@ def _parse_dynamic_section(data: bytes, hdr: dict) -> tuple[list[str], list[str]
     else:
         # Try to find .dynstr by looking for SHT_STRTAB that's not .shstrtab
         # This is a fallback; the linked approach is more reliable
-        return [], [], []
+        return [], [], [], None
 
     if dynstr_offset == 0 or dynstr_size == 0:
-        return [], [], []
+        return [], [], [], None
 
     # Read the string table
     strtab = data[dynstr_offset : dynstr_offset + dynstr_size]
-
-    def _read_str(str_offset: int) -> str:
-        end = strtab.find(b"\x00", str_offset)
-        if end < 0:
-            end = len(strtab)
-        return strtab[str_offset:end].decode("utf-8", errors="replace")
 
     # Parse dynamic entries
     if is64:
@@ -337,6 +376,7 @@ def _parse_dynamic_section(data: bytes, hdr: dict) -> tuple[list[str], list[str]
     needed: list[str] = []
     rpath: list[str] = []
     runpath: list[str] = []
+    soname: str | None = None
 
     num_entries = dynamic_size // dyn_entry_size
     for i in range(num_entries):
@@ -347,18 +387,20 @@ def _parse_dynamic_section(data: bytes, hdr: dict) -> tuple[list[str], list[str]
         if d_tag == DT_NULL:
             break
         elif d_tag == DT_NEEDED:
-            needed.append(_read_str(d_val))
+            needed.append(_read_strtab(strtab, d_val))
+        elif d_tag == DT_SONAME:
+            soname = _read_strtab(strtab, d_val)
         elif d_tag == DT_RPATH:
-            rpath.extend(_read_str(d_val).split(":"))
+            rpath.extend(_read_strtab(strtab, d_val).split(":"))
         elif d_tag == DT_RUNPATH:
-            runpath.extend(_read_str(d_val).split(":"))
+            runpath.extend(_read_strtab(strtab, d_val).split(":"))
 
     # Filter empty strings
     needed = [n for n in needed if n]
     rpath = [r for r in rpath if r]
     runpath = [r for r in runpath if r]
 
-    return needed, rpath, runpath
+    return needed, rpath, runpath, soname
 
 
 def parse_elf(path: Path) -> ElfInfo:
@@ -380,7 +422,7 @@ def parse_elf(path: Path) -> ElfInfo:
     )
 
     info.interpreter = _parse_program_headers(data, hdr)
-    info.needed, info.rpath, info.runpath = _parse_dynamic_section(data, hdr)
+    info.needed, info.rpath, info.runpath, info.soname = _parse_dynamic_section(data, hdr)
     return info
 
 
@@ -626,3 +668,527 @@ def assert_clean(results: list[ElfCheckResult]) -> None:
             f"ELF/pollution check failed ({len(all_violations)} violation(s))",
             all_violations,
         )
+
+
+# ---------------------------------------------------------------------------
+# Symbol tables and GNU versioning (CR-004 D4, BUILD-REQ-048)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DynamicSymbol:
+    """A single .dynsym entry."""
+
+    name: str
+    binding: str  # GLOBAL | WEAK
+    sym_type: str
+    shndx: int
+    version_index: int
+    required_version: str | None
+    is_undef: bool
+    is_ifunc: bool
+
+
+@dataclass
+class SymbolTable:
+    """Parsed dynamic symbol table + GNU version metadata for one ELF.
+
+    ``undef_strong``/``undef_weak`` map symbol name -> required GNU version
+    (None when the reference is unversioned). ``exports`` maps a defined
+    symbol name -> set of version names it defines (empty set = unversioned).
+    """
+
+    soname: str | None
+    needed: list[str]
+    symbols: list[DynamicSymbol]
+    undef_strong: dict[str, str | None]
+    undef_weak: dict[str, str | None]
+    exports: dict[str, set[str]]
+    ifunc: set[str]
+
+
+_BINDING_NAMES = {STB_GLOBAL: "GLOBAL", STB_WEAK: "WEAK"}
+
+_TYPE_NAMES = {
+    STT_NOTYPE: "NOTYPE",
+    STT_OBJECT: "OBJECT",
+    STT_FUNC: "FUNC",
+    STT_SECTION: "SECTION",
+    STT_FILE: "FILE",
+    STT_GNU_IFUNC: "GNU_IFUNC",
+}
+
+
+def _parse_gnu_verneed(
+    data: bytes, sections: list[dict], fmt: str, strtab: bytes
+) -> dict[int, str]:
+    """Parse SHT_GNU_verneed: version index (vna_other) -> version name."""
+    result: dict[int, str] = {}
+    for sec in sections:
+        if sec["type"] != SHT_GNU_VERNEED:
+            continue
+        off = sec["offset"]
+        end = off + sec["size"]
+        pos = off
+        while pos + 16 <= end:
+            vn_version, vn_cnt, vn_file, vn_aux, vn_next = struct.unpack_from(
+                fmt + "HHIII", data, pos
+            )
+            aux_pos = pos + vn_aux
+            for _ in range(vn_cnt):
+                if aux_pos + 16 > end:
+                    break
+                vna_hash, vna_flags, vna_other, vna_name, vna_next_aux = (
+                    struct.unpack_from(fmt + "IHHII", data, aux_pos)
+                )
+                result[vna_other] = _read_strtab(strtab, vna_name)
+                if vna_next_aux == 0:
+                    break
+                aux_pos += vna_next_aux
+            if vn_next == 0:
+                break
+            pos += vn_next
+    return result
+
+
+def _parse_gnu_verdef(
+    data: bytes, sections: list[dict], fmt: str, strtab: bytes
+) -> dict[int, str]:
+    """Parse SHT_GNU_verdef: version index (vd_ndx) -> version name.
+
+    Only the first aux entry of a verdef is the version's own name; further
+    aux entries declare parent versions and must not overwrite it.
+    """
+    result: dict[int, str] = {}
+    for sec in sections:
+        if sec["type"] != SHT_GNU_VERDEF:
+            continue
+        off = sec["offset"]
+        end = off + sec["size"]
+        pos = off
+        while pos + 20 <= end:
+            vd_version, vd_flags, vd_ndx, vd_cnt, vd_hash, vd_aux, vd_next = (
+                struct.unpack_from(fmt + "HHHHIII", data, pos)
+            )
+            aux_pos = pos + vd_aux
+            if vd_cnt >= 1 and aux_pos + 8 <= end:
+                vda_name, vda_next = struct.unpack_from(fmt + "II", data, aux_pos)
+                result[vd_ndx] = _read_strtab(strtab, vda_name)
+            if vd_next == 0:
+                break
+            pos += vd_next
+    return result
+
+
+def _parse_gnu_versym(
+    data: bytes, sections: list[dict], fmt: str, count: int
+) -> list[int]:
+    """Parse SHT_GNU_versym into version indices (VER_NDX_* semantics kept)."""
+    for sec in sections:
+        if sec["type"] != SHT_GNU_VERSYM:
+            continue
+        off = sec["offset"]
+        result: list[int] = []
+        for i in range(count):
+            pos = off + i * 2
+            if pos + 2 > len(data):
+                break
+            val = struct.unpack_from(fmt + "H", data, pos)[0]
+            result.append(val & 0x7FFF)  # strip VERSYM_HIDDEN
+        return result
+    return [VER_NDX_GLOBAL] * count
+
+
+def _parse_dynsym(
+    data: bytes, sections: list[dict], fmt: str, is64: bool
+) -> SymbolTable | None:
+    """Parse SHT_DYNSYM + GNU version sections into a SymbolTable."""
+    symsec = None
+    for sec in sections:
+        if sec["type"] == SHT_DYNSYM:
+            symsec = sec
+            break
+    if symsec is None:
+        return None
+    sym_offset = symsec["offset"]
+    sym_size = symsec["size"]
+    sym_link = symsec["link"]
+    entsize = symsec["entsize"] or (24 if is64 else 16)
+
+    if not (0 < sym_link < len(sections)):
+        return None
+    strsec = sections[sym_link]
+    strtab = data[strsec["offset"] : strsec["offset"] + strsec["size"]]
+
+    verneed_map = _parse_gnu_verneed(data, sections, fmt, strtab)
+    verdef_map = _parse_gnu_verdef(data, sections, fmt, strtab)
+    count = sym_size // entsize
+    versym = _parse_gnu_versym(data, sections, fmt, count)
+
+    symbols: list[DynamicSymbol] = []
+    for i in range(count):
+        off = sym_offset + i * entsize
+        if is64:
+            if off + 24 > len(data):
+                break
+            st_name, st_info, st_other, st_shndx, st_value, st_size = (
+                struct.unpack_from(fmt + "IBBHQQ", data, off)
+            )
+        else:
+            if off + 16 > len(data):
+                break
+            st_name, st_value, st_size, st_info, st_other, st_shndx = (
+                struct.unpack_from(fmt + "IIIBBH", data, off)
+            )
+        name = _read_strtab(strtab, st_name)
+        binding = st_info >> 4
+        sym_type = st_info & 0xF
+        if binding not in (STB_GLOBAL, STB_WEAK):
+            continue
+        if not name:
+            continue
+        version_index = versym[i] if i < len(versym) else VER_NDX_GLOBAL
+        is_undef = st_shndx == 0
+        required_version: str | None = None
+        if is_undef and version_index >= 2:
+            required_version = verneed_map.get(version_index)
+        elif not is_undef and version_index >= 2:
+            # defined symbol's version index refers to a verdef entry
+            defined_version = verdef_map.get(version_index)
+            if defined_version is not None:
+                pass  # captured below per-symbol version set
+        symbols.append(DynamicSymbol(
+            name=name,
+            binding=_BINDING_NAMES.get(binding, f"BIND_{binding}"),
+            sym_type=_TYPE_NAMES.get(sym_type, f"TYPE_{sym_type}"),
+            shndx=st_shndx,
+            version_index=version_index,
+            required_version=required_version,
+            is_undef=is_undef,
+            is_ifunc=sym_type == STT_GNU_IFUNC,
+        ))
+
+    undef_strong: dict[str, str | None] = {}
+    undef_weak: dict[str, str | None] = {}
+    exports: dict[str, set[str]] = {}
+    ifunc: set[str] = set()
+    for sym in symbols:
+        if sym.is_undef:
+            target = undef_weak if sym.binding == "WEAK" else undef_strong
+            target.setdefault(sym.name, sym.required_version)
+            continue
+        # exported definition (GLOBAL/WEAK, defined, not a section/file marker)
+        if sym.sym_type in ("SECTION", "FILE"):
+            continue
+        exports.setdefault(sym.name, set())
+        if sym.version_index >= 2:
+            exports[sym.name].add(_symbol_verdef_name(verdef_map, sym.version_index))
+        if sym.is_ifunc:
+            ifunc.add(sym.name)
+
+    return SymbolTable(
+        soname=None,  # filled by caller from ElfInfo
+        needed=[],
+        symbols=symbols,
+        undef_strong=undef_strong,
+        undef_weak=undef_weak,
+        exports=exports,
+        ifunc=ifunc,
+    )
+
+
+def _symbol_verdef_name(verdef_map: dict[int, str], version_index: int) -> str:
+    """Map a defined symbol's version index to its version name."""
+    return verdef_map.get(version_index, f"VER{version_index}")
+
+
+def _read_elf_data(path: Path) -> bytes:
+    with open(path, "rb") as f:
+        return f.read()
+
+
+_SYMBOL_CACHE: dict[Path, SymbolTable | None] = {}
+
+
+def parse_symbols(path: Path) -> SymbolTable | None:
+    """Parse the dynamic symbol table + GNU version metadata of an ELF file.
+
+    Returns None for non-ELF files or ELFs without a dynamic symbol table.
+    The soname and DT_NEEDED list are merged from the ELF header parsing.
+    """
+    if path in _SYMBOL_CACHE:
+        return _SYMBOL_CACHE[path]
+    data = _read_elf_data(path)
+    hdr_result = _read_elf_header(data)
+    if hdr_result is None:
+        _SYMBOL_CACHE[path] = None
+        return None
+    elf_class, _elf_data, hdr = hdr_result
+    fmt = hdr["fmt"]
+    is64 = elf_class == _ELFCLASS64
+    sections = _parse_sections(data, hdr)
+    table = _parse_dynsym(data, sections, fmt, is64)
+    if table is None:
+        _SYMBOL_CACHE[path] = None
+        return None
+    _, _, _, soname = _parse_dynamic_section(data, hdr)
+    table.soname = soname
+    info = parse_elf(path)
+    table.needed = info.needed
+    _SYMBOL_CACHE[path] = table
+    return table
+
+
+# ---------------------------------------------------------------------------
+# Symbol-integrity verification (CR-004 §7, BUILD-REQ-048)
+# ---------------------------------------------------------------------------
+
+
+def _soname_aliases(basename: str) -> list[str]:
+    """Candidate lookup names for a library basename.
+
+    ``libfoo.so.3.4.10`` -> [``libfoo.so.3.4.10``, ``libfoo.so.3``, ``libfoo.so``];
+    ``libc.so.6`` -> [``libc.so.6``, ``libc.so``]; ``libfoo.so`` -> [``libfoo.so``].
+    """
+    aliases = [basename]
+    name = basename
+    while True:
+        idx = name.rfind(".")
+        if idx <= 0:
+            break
+        if name[idx + 1 :].isdigit():
+            name = name[:idx]
+            aliases.append(name)
+        else:
+            break
+    return aliases
+
+
+def _index_library_candidates(roots: list[Path]) -> dict[str, list[Path]]:
+    """Index provider library files under *roots* (in precedence order).
+
+    Both real files and symlinks are indexed (a DT_NEEDED soname frequently
+    matches a symlink such as ``ld-linux-aarch64.so.1 -> ld-2.31.so``); the
+    map keys are soname aliases so a DT_NEEDED soname resolves to candidate
+    files in controlled-root precedence order.
+    """
+    index: dict[str, list[Path]] = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for so in sorted(root.rglob("*.so*")):
+            if not (so.is_file() or so.is_symlink()):
+                continue
+            for alias in _soname_aliases(so.name):
+                index.setdefault(alias, []).append(so)
+    return index
+
+
+def _resolve_provider(
+    needed: str, index: dict[str, list[Path]], parse_cache: dict[Path, SymbolTable | None]
+) -> Path | None:
+    """Resolve a DT_NEEDED soname to a provider file in precedence order."""
+    for cand in index.get(needed, []):
+        table = parse_cache.get(cand)
+        if table is None:
+            if cand not in parse_cache:
+                table = parse_symbols(cand)
+                parse_cache[cand] = table
+            else:
+                table = parse_cache[cand]
+        if table is None:
+            continue
+        if table.soname == needed or cand.name == needed:
+            return cand
+    candidates = index.get(needed, [])
+    return candidates[0] if candidates else None
+
+
+def _consumer_exemption_keys(path: Path) -> set[str]:
+    """Identities under which a consumer artifact may be exempted.
+
+    manifests/link-exemptions.yaml records **CMake target names**, while a
+    staged artifact carries its output filename. For executables the two
+    usually coincide, but a shared-library target ``foo`` produces
+    ``libfoo.so.1.2``; matching on the raw basename alone would silently miss
+    every library exemption (CR-004 评审 P2-7). Return every plausible key.
+    """
+    name = path.name
+    keys = {name}
+    stem = name
+    # Strip .so and any version suffixes: libfoo.so.1.2.3 -> libfoo
+    if ".so" in stem:
+        stem = stem.split(".so", 1)[0]
+    else:
+        stem = path.stem
+    keys.add(stem)
+    if stem.startswith("lib"):
+        keys.add(stem[3:])
+    return {k for k in keys if k}
+
+
+def check_symbol_integrity(
+    paths: list[Path],
+    roots: list[Path] | None = None,
+    missing_library_policy: str = "error",
+    exempt_consumers: frozenset[str] = frozenset(),
+) -> list[ElfCheckResult]:
+    """Verify undefined dynamic symbols against each artifact's DT_NEEDED closure.
+
+    For every executable / shared object / module in *paths*:
+
+    1. parse strong and weak undefined dynamic symbols;
+    2. build the transitive DT_NEEDED graph, locating dependencies in
+       *roots* under BUILD's controlled-root precedence (SDK staging -> TARGET
+       dependency staging -> sysroot);
+    3. parse each provider's exported dynamic symbols and GNU version metadata;
+    4. match symbol name, required version, visibility and provider definition;
+    5. emit deterministic diagnostics (consumer, symbol, required version,
+       traversed closure, missing provider/dependency).
+
+    Policy (CR-004 §7.3): strong unresolved symbols fail; weak undefined
+    symbols are non-fatal warnings; IFUNC definitions are valid providers;
+    versioned symbols match base name + GNU version identity (no stripping of
+    @GLIBC_* semantics); lazy binding is no exemption; a missing dependency
+    library is a release error or an explicitly selected dev-mode warning;
+    consumers in *exempt_consumers* (basenames from reviewed D2/D4 exemption
+    records) have their strong-unresolved findings downgraded to warnings as
+    staging corroboration.
+
+    Results are merged into :class:`ElfCheckResult` (one per consumer).
+    """
+    roots = list(roots or [])
+    results: list[ElfCheckResult] = []
+    index = _index_library_candidates(roots)
+    parse_cache: dict[Path, SymbolTable | None] = {}
+
+    consumers: list[Path] = []
+    for path in paths:
+        try:
+            cls = classify_file(path)
+        except OSError:
+            continue
+        if cls.file_type != "elf" or cls.elf_info is None:
+            continue
+        # Only artifacts that participate in dynamic linking are checked.
+        if cls.elf_info.elf_type not in (ET_EXEC, ET_DYN):
+            continue
+        consumers.append(path)
+
+    # Pre-seed the parse cache from consumers so self references never loop.
+    for path in consumers:
+        if path not in parse_cache:
+            parse_cache[path] = parse_symbols(path)
+
+    roots_desc = ", ".join(str(r) for r in roots) or "(none)"
+
+    for path in consumers:
+        table = parse_cache.get(path)
+        if table is None:
+            continue
+        result = ElfCheckResult(path=path)
+        result.classification = classify_file(path)
+        exempt = bool(_consumer_exemption_keys(path) & set(exempt_consumers))
+
+        # 1. Resolve the transitive DT_NEEDED closure.
+        closure: list[str] = []
+        missing_libs: list[str] = []
+        seen: set[str] = set()
+        queue: list[str] = list(table.needed)
+        while queue:
+            needed = queue.pop(0)
+            if needed in seen:
+                continue
+            seen.add(needed)
+            provider = _resolve_provider(needed, index, parse_cache)
+            if provider is None:
+                missing_libs.append(needed)
+                continue
+            closure.append(needed)
+            prov_table = parse_cache.get(provider)
+            if prov_table is not None:
+                for dep in prov_table.needed:
+                    if dep not in seen:
+                        queue.append(dep)
+
+        # 2. Missing dependency libraries (policy-gated).
+        for lib in missing_libs:
+            msg = (
+                f"{path}: dependency library '{lib}' not found in controlled "
+                f"roots ({roots_desc}); DT_NEEDED closure incomplete"
+            )
+            if missing_library_policy == "warning":
+                result.warnings.append(msg)
+            else:
+                result.violations.append(msg)
+
+        # 3. Merge provider exports (version sets) across the closure.
+        #    IFUNC 定义已随普通已定义符号进入 exports（_parse_dynsym 对所有
+        #    已定义符号填充 exports，STT_GNU_IFUNC 只是额外打标），因此这里
+        #    无需再单独累积 ifunc 集合（评审 P2-8：原实现收集后从未使用）。
+        exports: dict[str, set[str]] = {}
+        for provider_name in closure:
+            provider = _resolve_provider(provider_name, index, parse_cache)
+            prov_table = parse_cache.get(provider) if provider is not None else None
+            if prov_table is None:
+                continue
+            for sym_name, versions in prov_table.exports.items():
+                exports.setdefault(sym_name, set()).update(versions)
+
+        # 4. Match every undefined symbol.
+        def _describe(name: str, required_version: str | None) -> str:
+            return name if not required_version else f"{name}@{required_version}"
+
+        for name, required_version in sorted(table.undef_strong.items()):
+            versions = exports.get(name)
+            satisfied = versions is not None and (
+                required_version is None or required_version in versions
+            )
+            if satisfied:
+                continue
+            msg = (
+                f"{path}: undefined symbol '{_describe(name, required_version)}' "
+                f"not provided by DT_NEEDED closure "
+                f"(traversed: {' -> '.join(closure) or '(empty)'}; "
+                f"roots: {roots_desc})"
+            )
+            if exempt:
+                result.warnings.append(
+                    "[D4 corroboration] " + msg + " (target is a reviewed D2/D4 exemption)"
+                )
+            else:
+                result.violations.append(msg)
+
+        for name, required_version in sorted(table.undef_weak.items()):
+            versions = exports.get(name)
+            if versions is not None and (
+                required_version is None or required_version in versions
+            ):
+                continue
+            result.warnings.append(
+                f"{path}: weak undefined symbol "
+                f"'{_describe(name, required_version)}' not provided by "
+                f"DT_NEEDED closure (non-fatal diagnostic; "
+                f"traversed: {' -> '.join(closure) or '(empty)'})"
+            )
+
+        results.append(result)
+
+    results.sort(key=lambda r: str(r.path))
+    return results
+
+
+def check_symbol_integrity_staging(
+    staging_root: Path,
+    roots: list[Path] | None = None,
+    missing_library_policy: str = "error",
+    exempt_consumers: frozenset[str] = frozenset(),
+) -> list[ElfCheckResult]:
+    """Run :func:`check_symbol_integrity` over every file in a staging tree."""
+    paths = [p for p in sorted(staging_root.rglob("*")) if p.is_file()]
+    return check_symbol_integrity(
+        paths,
+        roots=roots,
+        missing_library_policy=missing_library_policy,
+        exempt_consumers=exempt_consumers,
+    )

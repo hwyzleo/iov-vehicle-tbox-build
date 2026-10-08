@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .artifact import ArtifactManifest, get_git_commit
-from .elfcheck import check_staging, ElfCheckResult
+from .elfcheck import check_staging, check_symbol_integrity_staging
 from .errors import BuildFailure, TboxBuildError
 from .graph import DependencyGraph
 from .manifest import (
@@ -56,6 +56,10 @@ class BuildConfig:
     clean: bool = False
     dry_run: bool = False
     skip_recipes: bool = False
+    # CR-004 D2: 全局链接加固开关。默认关闭；仅在完成 tbox-someip-orin 完整
+    # 非 dry-run 构建验证并登记豁免后，才可由评审决定默认开启
+    # （评审 P1-4：此前 toolchain 有 option 但 python/CI 侧无任何开启通路）。
+    link_hardening: bool = False
 
     @property
     def build_type(self) -> str:
@@ -117,6 +121,8 @@ class BuildReport:
     artifact_manifest_path: str | None = None
     elf_check_violations: int = 0
     elf_check_warnings: int = 0
+    symbol_integrity_violations: int = 0
+    symbol_integrity_warnings: int = 0
     errors: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -203,6 +209,12 @@ class BuildOrchestrator:
     def load_and_validate(self) -> tuple[ServiceManifest, ReleaseSetManifest]:
         """Load all manifests and run pre-build validation."""
         from .manifest import load_yaml
+        from .schema import (
+            validate_dependency_lock,
+            validate_repository_inventory,
+            validate_retirement_manifest_schema,
+            validate_link_exemptions_schema,
+        )
 
         svc_raw = load_yaml(self.project.service_manifest_path)
         rs_raw = load_yaml(self.project.release_set_manifest_path)
@@ -210,8 +222,21 @@ class BuildOrchestrator:
 
         validate_service_manifest(svc_raw, self.project.root)
         validate_release_set_manifest(rs_raw, self.project.root)
-        from .schema import validate_dependency_lock
         validate_dependency_lock(lock_raw, self.project.root)
+
+        # CR-004 manifests (optional files; validated when present)
+        if self.project.repository_inventory_path.is_file():
+            validate_repository_inventory(
+                load_yaml(self.project.repository_inventory_path), self.project.root
+            )
+        if self.project.retirement_manifest_path.is_file():
+            validate_retirement_manifest_schema(
+                load_yaml(self.project.retirement_manifest_path), self.project.root
+            )
+        if self.project.link_exemptions_path.is_file():
+            validate_link_exemptions_schema(
+                load_yaml(self.project.link_exemptions_path), self.project.root
+            )
 
         service_manifest = self.project.load_service_manifest()
         release_set_manifest = self.project.load_release_set_manifest()
@@ -247,6 +272,11 @@ class BuildOrchestrator:
             toolchain = self.project.cmake_dir / "toolchains" / "orin-aarch64.cmake"
             cmd.append(f"-DCMAKE_TOOLCHAIN_FILE={toolchain}")
             cmd.append(f"-DTBOX_SYSROOT={self.project.sysroot_path}")
+            # CR-004 D2: 显式透传，使 ON/OFF 都是受控输入而非依赖 toolchain 默认。
+            cmd.append(
+                f"-DTBOX_LINK_HARDENING="
+                f"{'ON' if self.config.link_hardening else 'OFF'}"
+            )
 
         # Per-service CMake cache variables (TBOX-SOMEIP-DSN-CR-006 §11.3):
         # BUILD 提供受控构建开关（e.g. USE_REAL_IPC=ON / USE_MOCK_SOMEIP=OFF），
@@ -993,6 +1023,34 @@ class BuildOrchestrator:
                     print(f"  {len(elf_results)} file(s) checked, "
                           f"{violations} violation(s), {warnings} warning(s)")
 
+            # 6.5 ELF symbol-integrity gate (CR-004 D4, BUILD-REQ-048)
+            #     Verifies every staged ELF's undefined symbols against its
+            #     transitive DT_NEEDED closure resolved from the controlled
+            #     roots (SDK staging -> dep staging -> sysroot). Strong
+            #     unresolved symbols and missing release dependencies fail;
+            #     weak undefs are diagnostics. Findings merge into the report.
+            if report.status != "failed" and not self.config.dry_run:
+                print("\n=== ELF symbol-integrity check ===")
+                sym_roots = self._symbol_integrity_roots()
+                sym_results = check_symbol_integrity_staging(
+                    self.staging.install_root,
+                    roots=sym_roots,
+                    missing_library_policy="error",
+                    exempt_consumers=self._link_exempt_consumers(),
+                )
+                sym_violations = sum(len(r.violations) for r in sym_results)
+                sym_warnings = sum(len(r.warnings) for r in sym_results)
+                report.symbol_integrity_violations = sym_violations
+                report.symbol_integrity_warnings = sym_warnings
+                if sym_violations > 0:
+                    report.status = "failed"
+                    for r in sym_results:
+                        for v in r.violations:
+                            report.errors.append(v)
+                else:
+                    print(f"  {len(sym_results)} ELF(s) checked, "
+                          f"{sym_violations} violation(s), {sym_warnings} warning(s)")
+
             # 7. Artifact manifest (only if all checks passed)
             if report.status != "failed" and not self.config.dry_run:
                 # 6.5 Stage shared-linkage TARGET dependency runtime libraries
@@ -1053,6 +1111,32 @@ class BuildOrchestrator:
             report.save(report_path)
 
         return report
+
+    def _symbol_integrity_roots(self) -> list[Path]:
+        """Controlled roots for symbol resolution (CR-004 §7.2).
+
+        Precedence: composed staging set -> SDK staging dirs -> TARGET
+        dependency staging -> sysroot (SPEC §5.4 / CR-004 §7.2).
+        """
+        roots: list[Path] = [self.staging.install_root]
+        if self.staging.sdk_root.is_dir():
+            roots.extend(
+                sorted(p for p in self.staging.sdk_root.iterdir() if p.is_dir())
+            )
+        roots.append(self.staging.dep_staging)
+        roots.append(self.project.sysroot_path)
+        return roots
+
+    def _link_exempt_consumers(self) -> frozenset[str]:
+        """Basenames of consumers covered by reviewed D2/D4 exemption records."""
+        exemptions = self.project.load_link_exemptions()
+        if exemptions is None:
+            return frozenset()
+        names: set[str] = set()
+        for ex in exemptions.exemptions:
+            names.add(ex.target)
+            names.add(ex.target.split(".")[0])
+        return frozenset(names)
 
     def _generate_artifact_manifest(
         self,

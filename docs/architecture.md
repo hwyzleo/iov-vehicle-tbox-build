@@ -43,15 +43,15 @@ The Python package `tbox_build/` provides:
 | Module | Responsibility |
 |--------|---------------|
 | `manifest.py` | Load and parse YAML manifests into typed dataclasses |
-| `schema.py` | JSON Schema validation for service/release-set manifests |
+| `schema.py` | JSON Schema validation for service/release-set/inventory/retirement/link-exemption manifests |
 | `graph.py` | Dependency graph: topological sort, cycle/missing-dep detection |
-| `validator.py` | Cross-reference validation: systemd units, health/smoke scripts |
-| `elfcheck.py` | Pure-Python ELF parser: architecture, dynamic deps, RPATH, pollution |
+| `validator.py` | Cross-reference validation: systemd units, health/smoke scripts, manifest coverage (D1), retirement safety (D3), link exemptions (D2) |
+| `elfcheck.py` | Pure-Python ELF parser: architecture, dynamic deps, RPATH, pollution, undefined-symbol integrity against the DT_NEEDED closure (D4) |
 | `staging.py` | Staging directory management and file ownership tracking |
 | `artifact.py` | Artifact manifest generation with per-file metadata |
 | `orchestrator.py` | Full build pipeline: configure -> build -> install -> check -> manifest |
 | `packaging.py` | tar + manifest package creation |
-| `deploy.py` | Deploy pipeline framework (pre-check -> upload -> backup -> install -> verify) |
+| `deploy.py` | Deploy pipeline framework (pre-check -> upload -> backup -> retire -> install -> verify) |
 | `verify.py` | Staging and package verification |
 | `sysroot.py` | Sysroot import: symlink fixing, file manifest, architecture verification |
 

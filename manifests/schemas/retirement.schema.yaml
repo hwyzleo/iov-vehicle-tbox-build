@@ -1,0 +1,79 @@
+# JSON Schema (Draft-07) for TBOX Build Retirement Manifest (CR-004 D3)
+# Validates manifests/retirement.yaml
+#
+# Field policy (CR-004 §6, BUILD-REQ-047):
+#   - retirement is platform/release-set history owned by BUILD, NOT service
+#     runtime metadata; no service schema field is added.
+#   - retired_units[] and retired_paths[] are optional and default to empty,
+#     so existing service manifests remain valid unchanged.
+#   - additionalProperties: false; the parser additionally rejects unsafe
+#     paths (wildcards, root escape, /etc + /var wildcards), duplicates,
+#     active-unit conflicts, and intersections with device-managed or
+#     preserve configuration policy.
+$schema: "http://json-schema.org/draft-07/schema#"
+title: TBOX Build Retirement Manifest
+type: object
+required:
+  - version
+  - platforms
+additionalProperties: false
+properties:
+  version:
+    type: integer
+    minimum: 1
+  platforms:
+    type: object
+    minProperties: 1
+    additionalProperties: false
+    patternProperties:
+      "^[a-z][a-z0-9-]*$":
+        type: object
+        required:
+          - retired_units
+          - retired_paths
+        additionalProperties: false
+        properties:
+          retired_units:
+            type: array
+            items:
+              type: object
+              required:
+                - name
+                - owner
+                - reason
+              additionalProperties: false
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  # 仅允许合法 systemd 单元名。无 pattern 时 shell 元字符可随
+                  # 清单进入 deploy 的远端 systemctl 命令（CR-004 评审 P0-1）。
+                  pattern: "^[A-Za-z0-9@._-]+\\.(service|socket|timer|target|path|mount|slice)$"
+                owner:
+                  type: string
+                  minLength: 1
+                reason:
+                  type: string
+                  minLength: 1
+          retired_paths:
+            type: array
+            items:
+              type: object
+              required:
+                - path
+                - owner
+                - reason
+              additionalProperties: false
+              properties:
+                path:
+                  type: string
+                  minLength: 1
+                  # 绝对路径，且字符集不含空白与任何 shell 元字符
+                  # （; $ ` & | ( ) < > ' " \ * ? [ ] 空格），避免注入与分词。
+                  pattern: "^/[A-Za-z0-9._@+-]+(/[A-Za-z0-9._@+-]+)*$"
+                owner:
+                  type: string
+                  minLength: 1
+                reason:
+                  type: string
+                  minLength: 1

@@ -1,0 +1,58 @@
+# TBOX Build Retirement Manifest (CR-004 D3)
+#
+# 平台/release-set 级别的退役契约：声明设备上将被退役的历史 systemd unit
+# 与文件路径。由 BUILD 在部署事务中执行（backup 之后、install 之前）：
+#   1. 捕获每个 unit 的 enabled/disabled 与 active/inactive 状态；
+#   2. systemctl disable --now <unit>（已存在才执行，缺失为成功 no-op）；
+#   3. 备份已存在的退役路径（含元数据与 digest）；
+#   4. 仅移除经校验清单批准（批准根、无通配、不触 device-managed/preserve）
+#      的路径；
+#   5. 命令与结果记入部署报告；dry-run 打印精确命令；失败回滚恢复文件与
+#      unit 先前状态。
+#
+# 不新增任何服务 schema 字段；两个数组均可选、默认空（BUILD-REQ-047）。
+#
+# ---------------------------------------------------------------------------
+# 为什么不整棵声明 /opt/tbox
+# ---------------------------------------------------------------------------
+# iov-vehicle-tbox-framework/scripts/tbox-env.sh 把 TBOX_PREFIX=/opt/tbox 记作
+# 合法的生产/CI 安装前缀。现行 BUILD 流水线装到 /usr，但 /opt/tbox 作为前缀
+# 的语义尚未正式废止，整棵树声明退役会越过 BUILD 的职权。故只声明已确认由
+# 现行 install 规则替代的具名产物。
+#
+# ---------------------------------------------------------------------------
+# 已知数据缺口（不是漏填，当前无法安全声明）
+# ---------------------------------------------------------------------------
+# /opt/tbox/lib 下存在两份 SHA 不同的 yaml-cpp（现场观测：libyaml-cpp.so 与
+# libyaml-cpp.so.0.8 为 1658184B，libyaml-cpp.so.0.8.0 为 465984B，.so.0.8
+# 软链指向前者）。精确文件名集合未被任何 manifest/docs 记录，而本机制有意
+# 禁止通配符，因此无法在此安全声明。补齐前置条件：设备盘点输出确切路径列表。
+# 该项落在设备盘点/一次性清理范畴，盘点完成后应作为独立条目补入本清单。
+
+version: 1
+platforms:
+  orin:
+    retired_units:
+      # 设备现状：prov.service 与 tbox-prov.service 同时 enabled，前者指向
+      # /opt/tbox/bin/prov（崩溃重启循环，27 个未定义符号）。现行 PROV 只交付
+      # tbox-prov.service，故 prov.service 为遗留单元。
+      - name: prov.service
+        owner: build
+        reason: "replaced-by-tbox-prov.service (legacy duplicate unit; PROV ships tbox-prov.service only)"
+
+    retired_paths:
+      # 遗留单体产物，均不由任何现行 install 规则产出。
+      - path: /opt/tbox/bin/prov
+        owner: build
+        reason: "legacy-monolith (superseded by prov-runtime -> /usr/bin/tbox_prov)"
+
+      # 以下两条源自 CR-004 §2 动机链，修复归属 DIAG CR（设计 §12
+      # "DIAG fixes assigned elsewhere"）。但退役数据只能落在本平台级清单
+      # —— D3 有意否决了服务级 retired_* 字段，服务侧没有自声明通路。
+      # 故在此登记并以 owner 记录归属，避免"机制上线、数据为空"重演。
+      - path: /opt/tbox/bin/diag
+        owner: diag-cr
+        reason: "legacy-monolith (superseded by diag-runtime -> /usr/bin/tbox_diag)"
+      - path: /opt/tbox/lib/libhwyz.so
+        owner: diag-cr
+        reason: "legacy-monolith shared library with missing yaml-cpp DT_NEEDED; root cause of the two-month tbox-diag outage (CR-004 §2)"

@@ -89,3 +89,54 @@ def validate_dependency_lock(data: dict[str, Any], project_root: Path | None = N
             f"Dependency lock schema validation failed ({len(errors)} error(s))",
             _format_errors(errors),
         )
+
+
+def validate_repository_inventory(
+    data: dict[str, Any], project_root: Path | None = None
+) -> None:
+    """Validate the repository inventory dict (CR-004 D1).
+
+    Raises SchemaValidationError on failure.
+    """
+    schema = load_schema("repository-inventory", project_root)
+    validator = jsonschema.Draft7Validator(schema)
+    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
+    if errors:
+        raise SchemaValidationError(
+            f"Repository inventory schema validation failed ({len(errors)} error(s))",
+            _format_errors(errors),
+        )
+
+
+def validate_retirement_manifest_schema(
+    data: dict[str, Any], project_root: Path | None = None
+) -> None:
+    """Validate the retirement manifest dict (CR-004 D3).
+
+    Raises SchemaValidationError on failure.
+    """
+    schema = load_schema("retirement", project_root)
+    validator = jsonschema.Draft7Validator(schema)
+    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
+    if errors:
+        raise SchemaValidationError(
+            f"Retirement manifest schema validation failed ({len(errors)} error(s))",
+            _format_errors(errors),
+        )
+
+
+def validate_link_exemptions_schema(
+    data: dict[str, Any], project_root: Path | None = None
+) -> None:
+    """Validate link-hardening exemption records (CR-004 D2 §5.4).
+
+    Raises SchemaValidationError on failure.
+    """
+    schema = load_schema("link-exemptions", project_root)
+    validator = jsonschema.Draft7Validator(schema)
+    errors = sorted(validator.iter_errors(data), key=lambda e: list(e.absolute_path))
+    if errors:
+        raise SchemaValidationError(
+            f"Link-exemptions schema validation failed ({len(errors)} error(s))",
+            _format_errors(errors),
+        )

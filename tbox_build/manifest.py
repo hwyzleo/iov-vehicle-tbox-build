@@ -190,6 +190,174 @@ class ConfigDeploymentManifest:
         return None
 
 
+# ---------------------------------------------------------------------------
+# Repository inventory model (CR-004 D1)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RepositoryEntry:
+    """A single explicitly declared repository in the coverage inventory.
+
+    ``path`` is relative to the project root (e.g. ``../iov-vehicle-tbox-prov``).
+    ``empty_components`` are post-install content-production exceptions
+    (CR-004 §4.4): an install component may legitimately produce no files
+    without being conflated with missing manifest coverage.
+    """
+
+    id: str
+    path: str
+    description: str | None = None
+    empty_components: list[str] = field(default_factory=list)
+
+
+@dataclass
+class CoverageAllowlistEntry:
+    """A reviewed coverage allowlist entry (CR-004 §4.5).
+
+    Requires an owner, a non-generic reason, and an expiry (``expires``) or
+    review (``review_by``) condition. Expired entries fail validation;
+    permanent ownerless exemptions are rejected at parse time.
+    """
+
+    repository: str
+    owner: str
+    reason: str
+    expires: str | None = None
+    review_by: str | None = None
+    milestone: str | None = None
+
+    @property
+    def review_condition(self) -> str | None:
+        return self.expires or self.review_by
+
+    def is_expired(self, today: Any | None = None) -> bool:
+        """True when the allowlist entry has passed its expiry/review date."""
+        import datetime
+        if today is None:
+            today = datetime.date.today()
+        for key in ("expires", "review_by"):
+            raw = getattr(self, key)
+            if not raw:
+                continue
+            try:
+                when = datetime.date.fromisoformat(raw)
+            except ValueError:
+                return False  # unparsable dates are caught by the parser
+            if today > when:
+                return True
+        return False
+
+
+@dataclass
+class RepositoryInventory:
+    """Explicitly declared repository scan set + coverage allowlist (CR-004 §4)."""
+
+    version: int
+    repositories: dict[str, RepositoryEntry]
+    allowlist: list[CoverageAllowlistEntry]
+
+    def get(self, repo_id: str) -> RepositoryEntry | None:
+        return self.repositories.get(repo_id)
+
+    def __contains__(self, repo_id: str) -> bool:
+        return repo_id in self.repositories
+
+    def __len__(self) -> int:
+        return len(self.repositories)
+
+    def __iter__(self):
+        return iter(self.repositories.values())
+
+    def find_allowlist(self, repo_id: str) -> CoverageAllowlistEntry | None:
+        for entry in self.allowlist:
+            if entry.repository == repo_id:
+                return entry
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Retirement manifest model (CR-004 D3)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RetiredUnit:
+    """A systemd unit scheduled for retirement on a platform."""
+
+    name: str
+    owner: str
+    reason: str
+
+
+@dataclass
+class RetiredPath:
+    """A filesystem path scheduled for retirement on a platform."""
+
+    path: str
+    owner: str
+    reason: str
+
+
+@dataclass
+class RetirementPlatform:
+    """Per-platform retirement declarations (both optional, default empty)."""
+
+    retired_units: list[RetiredUnit] = field(default_factory=list)
+    retired_paths: list[RetiredPath] = field(default_factory=list)
+
+
+@dataclass
+class RetirementManifest:
+    """Platform-owned retirement contract (CR-004 §6.1).
+
+    Retirement is release-set history owned by BUILD, not service runtime
+    metadata. Existing service manifests remain valid when the optional
+    arrays are absent.
+    """
+
+    version: int
+    platforms: dict[str, RetirementPlatform]
+
+    def platform_for(self, platform: str) -> RetirementPlatform:
+        return self.platforms.get(platform, RetirementPlatform())
+
+
+# ---------------------------------------------------------------------------
+# Link-hardening exemption records (CR-004 D2 §5.4)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class LinkExemption:
+    """A structured D2/D4 exemption record for a named target."""
+
+    target: str
+    owner: str
+    reason: str
+    symbol_class: str
+    risk: str
+    scope: str
+    removal_condition: str
+
+
+@dataclass
+class LinkExemptions:
+    """Collection of reviewed link-hardening exemptions."""
+
+    version: int
+    exemptions: list[LinkExemption]
+
+    def targets(self) -> set[str]:
+        return {e.target for e in self.exemptions}
+
+    def get(self, target: str) -> LinkExemption | None:
+        for e in self.exemptions:
+            if e.target == target:
+                return e
+        return None
+
+
 @dataclass
 class ReleaseSet:
     """A single release set."""
@@ -713,6 +881,131 @@ def load_dependency_lock(path: Path) -> DependencyLock:
     return DependencyLock(dependencies=deps, cache=cache)
 
 
+def _parse_iso_date(value: Any, label: str) -> str:
+    """Validate an ISO-8601 date string (YYYY-MM-DD); raise on bad input."""
+    import datetime
+    if not isinstance(value, str) or not value.strip():
+        raise SchemaValidationError(f"{label} must be a YYYY-MM-DD date string")
+    raw = value.strip()
+    try:
+        datetime.date.fromisoformat(raw)
+    except ValueError:
+        raise SchemaValidationError(
+            f"{label} is not a valid YYYY-MM-DD date: '{raw}'"
+        )
+    return raw
+
+
+def load_repository_inventory(path: Path) -> RepositoryInventory:
+    """Load and parse the repository inventory + coverage allowlist (CR-004 §4)."""
+    data = load_yaml(path)
+    version = int(data.get("version", 1))
+    raw_repos = data.get("repositories", {}) or {}
+    repositories: dict[str, RepositoryEntry] = {}
+    for repo_id, rdata in raw_repos.items():
+        rpath = rdata.get("path")
+        if not rpath or not isinstance(rpath, str):
+            raise SchemaValidationError(
+                f"repository '{repo_id}' requires a non-empty 'path' string"
+            )
+        repositories[repo_id] = RepositoryEntry(
+            id=repo_id,
+            path=rpath,
+            description=rdata.get("description"),
+            empty_components=[str(c) for c in rdata.get("empty_components", [])],
+        )
+
+    allowlist: list[CoverageAllowlistEntry] = []
+    for entry in (data.get("coverage_allowlist", []) or []):
+        repo = entry.get("repository", "")
+        owner = entry.get("owner", "")
+        reason = entry.get("reason", "")
+        if not repo or not isinstance(repo, str):
+            raise SchemaValidationError(
+                "coverage_allowlist entry requires a non-empty 'repository' string"
+            )
+        if not owner or not isinstance(owner, str):
+            raise SchemaValidationError(
+                f"coverage_allowlist entry '{repo}' requires a non-empty 'owner' "
+                f"(permanent ownerless exemptions are rejected)"
+            )
+        if not reason or not isinstance(reason, str) or len(reason.strip()) < 8:
+            raise SchemaValidationError(
+                f"coverage_allowlist entry '{repo}' requires a substantive 'reason' "
+                f"(generic exemptions are rejected)"
+            )
+        # Generic patterns (wildcards) are rejected: only concrete repo ids.
+        if any(ch in repo for ch in "*?[]"):
+            raise SchemaValidationError(
+                f"coverage_allowlist entry '{repo}' uses a generic pattern; "
+                f"only concrete repository ids are allowed"
+            )
+        expires = entry.get("expires")
+        review_by = entry.get("review_by")
+        if not expires and not review_by:
+            raise SchemaValidationError(
+                f"coverage_allowlist entry '{repo}' requires 'expires' or "
+                f"'review_by' (expiry/review condition is mandatory)"
+            )
+        if expires:
+            expires = _parse_iso_date(expires, f"coverage_allowlist '{repo}'.expires")
+        if review_by:
+            review_by = _parse_iso_date(
+                review_by, f"coverage_allowlist '{repo}'.review_by"
+            )
+        allowlist.append(CoverageAllowlistEntry(
+            repository=repo,
+            owner=owner,
+            reason=reason.strip(),
+            expires=expires,
+            review_by=review_by,
+            milestone=entry.get("milestone"),
+        ))
+    return RepositoryInventory(version=version, repositories=repositories, allowlist=allowlist)
+
+
+def load_retirement_manifest(path: Path) -> RetirementManifest:
+    """Load and parse the platform retirement manifest (CR-004 §6.1)."""
+    data = load_yaml(path)
+    version = int(data.get("version", 1))
+    platforms: dict[str, RetirementPlatform] = {}
+    for plat, pdata in (data.get("platforms", {}) or {}).items():
+        units: list[RetiredUnit] = []
+        for entry in (pdata.get("retired_units", []) or []):
+            units.append(RetiredUnit(
+                name=str(entry.get("name", "")),
+                owner=str(entry.get("owner", "")),
+                reason=str(entry.get("reason", "")),
+            ))
+        paths: list[RetiredPath] = []
+        for entry in (pdata.get("retired_paths", []) or []):
+            paths.append(RetiredPath(
+                path=str(entry.get("path", "")),
+                owner=str(entry.get("owner", "")),
+                reason=str(entry.get("reason", "")),
+            ))
+        platforms[plat] = RetirementPlatform(retired_units=units, retired_paths=paths)
+    return RetirementManifest(version=version, platforms=platforms)
+
+
+def load_link_exemptions(path: Path) -> LinkExemptions:
+    """Load and parse structured link-hardening exemption records (CR-004 §5.4)."""
+    data = load_yaml(path)
+    version = int(data.get("version", 1))
+    exemptions: list[LinkExemption] = []
+    for entry in (data.get("exemptions", []) or []):
+        exemptions.append(LinkExemption(
+            target=str(entry.get("target", "")),
+            owner=str(entry.get("owner", "")),
+            reason=str(entry.get("reason", "")),
+            symbol_class=str(entry.get("symbol_class", "")),
+            risk=str(entry.get("risk", "")),
+            scope=str(entry.get("scope", "")),
+            removal_condition=str(entry.get("removal_condition", "")),
+        ))
+    return LinkExemptions(version=version, exemptions=exemptions)
+
+
 def load_config_deployment_manifest(path: Path) -> ConfigDeploymentManifest:
     """Load and parse the config-deployment policy manifest (CR-003 §7)."""
     data = load_yaml(path)
@@ -806,6 +1099,18 @@ class Project:
         return self.manifests_dir / "config-deployment.yaml"
 
     @property
+    def repository_inventory_path(self) -> Path:
+        return self.manifests_dir / "repository-inventory.yaml"
+
+    @property
+    def retirement_manifest_path(self) -> Path:
+        return self.manifests_dir / "retirement.yaml"
+
+    @property
+    def link_exemptions_path(self) -> Path:
+        return self.manifests_dir / "link-exemptions.yaml"
+
+    @property
     def dependencies_dir(self) -> Path:
         return self.root / "dependencies"
 
@@ -865,6 +1170,27 @@ class Project:
         if not path.is_file():
             return ConfigDeploymentManifest(version=1, platforms={})
         return load_config_deployment_manifest(path)
+
+    def load_repository_inventory(self) -> RepositoryInventory | None:
+        """Load the repository inventory; returns None if absent (check skipped)."""
+        path = self.repository_inventory_path
+        if not path.is_file():
+            return None
+        return load_repository_inventory(path)
+
+    def load_retirement_manifest(self) -> RetirementManifest | None:
+        """Load the retirement manifest; returns None if absent (no retirements)."""
+        path = self.retirement_manifest_path
+        if not path.is_file():
+            return None
+        return load_retirement_manifest(path)
+
+    def load_link_exemptions(self) -> LinkExemptions | None:
+        """Load link-hardening exemption records; None if absent."""
+        path = self.link_exemptions_path
+        if not path.is_file():
+            return None
+        return load_link_exemptions(path)
 
     def staging_dir(self, platform: str = "orin", profile: str = "release") -> Path:
         return self.out_dir / platform / profile
