@@ -247,8 +247,11 @@ services:
       service_dependencies:
         - framework
         - mqtt
+      # protobuf: TSP 自备 proto（proto/vehicle/common/v1/envelope.proto）并经
+      # pkg_check_modules(protobuf) 链接 TARGET runtime（CR-009）。
       target_dependencies:
         - nlohmann-json
+        - protobuf
       install_components:
         - name: tsp-sdk
           staging: sdk
@@ -304,6 +307,10 @@ services:
         - vsomeip
         - commonapi-core
         - commonapi-someip
+        # protobuf: SOMEIP 自备 proto（proto/vehicle/common/v1/
+        # vehicle_message_envelope.proto）并经 pkg_check_modules(protobuf)
+        # 链接 TARGET runtime（CR-008）。HOST protoc 同为受控输入（Dockerfile）。
+        - protobuf
       install_components:
         - name: someip-runtime
           staging: rootfs

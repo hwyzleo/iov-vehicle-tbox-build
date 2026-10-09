@@ -157,6 +157,16 @@ class TestReleaseBuildRejectsPendingSha:
             license="EPL-2.0", boundary="TARGET",
             architecture="aarch64", linkage="static",
         )
+        # protobuf: tsp / someip 的 target dependency（TSP CR-009 / SOMEIP
+        # CR-008 自备 proto，经 pkg_check_modules(protobuf) 消费 TARGET
+        # runtime）。patched lock 必须包含，避免 missing-entry 校验在 PENDING
+        # release guard 之前短路（同 nlohmann-json/curl/mosquitto 的理由）。
+        protobuf_entry = DependencyEntry(
+            name="protobuf", version="3.21.12", source_url="http://x",
+            source_sha256="d69f9deb6a75e2580465c6c4c5111b89c4dc2fa94e3a85fcd2ffcd9a143d9273",
+            license="BSD-3-Clause", boundary="TARGET",
+            architecture="aarch64", linkage="static",
+        )
         monkeypatch.setattr(
             project, "load_dependency_lock",
             lambda: DependencyLock(dependencies={
@@ -164,6 +174,7 @@ class TestReleaseBuildRejectsPendingSha:
                 "nlohmann-json": nlohmann_entry,
                 "curl": curl_entry,
                 "mosquitto": mosquitto_entry,
+                "protobuf": protobuf_entry,
                 **{d.name: d for d in someip_deps},
             }),
         )

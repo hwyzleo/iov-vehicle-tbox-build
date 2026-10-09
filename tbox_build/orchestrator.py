@@ -339,6 +339,17 @@ class BuildOrchestrator:
             # staging, so a single sysroot dir is correct here; CMake 3.16 does
             # not derive this from CMAKE_SYSROOT automatically.
             env["PKG_CONFIG_SYSROOT_DIR"] = str(self.staging.dep_staging)
+            # pkg-config 默认把 -I/usr/include 与 -L/usr/lib 当作「系统默认
+            # 路径」直接丢弃，而且该过滤发生在 PKG_CONFIG_SYSROOT_DIR 重根
+            # 之后仍以原始路径为判据 —— 结果是 protobuf.pc / vsomeip3.pc
+            # （includedir=/usr/include、libdir=/usr/lib，DESTDIR 安装的必然
+            # 形态）对外输出空 Cflags 和缺 -L 的 Libs。表现为
+            # PkgConfig::PROTOBUF 的 INTERFACE_INCLUDE_DIRECTORIES 为空，
+            # tsp_proto 编译时报 google/protobuf/port_def.inc: No such file。
+            # 这两个开关让被重根过的路径照常输出；因为重根目标是 dep staging
+            # 而非真实 /usr，不存在污染宿主系统路径的风险。
+            env["PKG_CONFIG_ALLOW_SYSTEM_CFLAGS"] = "1"
+            env["PKG_CONFIG_ALLOW_SYSTEM_LIBS"] = "1"
         # SDK staging: inject ALL upstream service dependency SDK directories
         # as a ':'-separated list (TBOX-MQTT-DSN-CR-011 §6.1). The toolchain
         # processes TBOX_SDK_STAGING_DIRS and prepends each <dir>/usr to

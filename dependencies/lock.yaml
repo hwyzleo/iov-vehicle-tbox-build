@@ -150,6 +150,56 @@ dependencies:
     # CMake 构建（顶层 CMakeLists.txt，同 commonapi-core）；需 vsomeip 与 core
     # runtime 先行进入 staging 并暴露 pkg-config/.pc。
 
+  # ================================================================
+  # Protocol Buffers（TBOX-TSP-DSN-CR-009 / TBOX-SOMEIP-DSN-CR-008）
+  #   TSP 与 SOMEIP 都自备 proto 并经 pkg_check_modules(protobuf) 消费
+  #   TARGET runtime。此前 protobuf 未登记，两者的 configure 在受控容器内
+  #   直接失败（"No package 'protobuf' found"）。
+  #
+  #   版本选择 3.21.12（release v21.12）的原因链：
+  #    (1) 两个服务的 proto 均为 proto3 且使用 field presence（optional），
+  #        需 protoc >= 3.15；SOMEIP 不传 --experimental_allow_proto3_optional，
+  #        TSP 传该 flag —— 3.21.12 同时满足（实测两条 protoc 命令均通过）。
+  #    (2) 3.21.12 是引入 abseil 硬依赖（22.x）之前的最后一条 C++ 线，
+  #        仅需 C++14，适配容器 gcc-9 与 CMake 3.16。
+  #    (3) 生成代码的版本门禁为 #if PROTOBUF_VERSION < 3021000，
+  #        故 TARGET runtime 必须是 3.21.x，与 HOST protoc 同版本。
+  #
+  #   linkage=static 的原因：Orin sysroot 只带 runtime libprotobuf.so.17
+  #   （= 3.6.1，无 dev 头/软链/.pc，无法解析），且 3.6.1 runtime 无法承载
+  #   3.21 生成代码。静态链接避免与设备既有 libprotobuf.so.17 SONAME 冲突，
+  #   与 curl 的处置同理。
+  #
+  #   protoc 二进制不由本 recipe 产出（protobuf_BUILD_PROTOC_BINARIES=OFF）：
+  #   protoc 是 HOST 工具，由 ci/Dockerfile 以固定 sha256 的官方 release
+  #   提供（find_program 在 toolchain 下走 CMAKE_FIND_ROOT_PATH_MODE_PROGRAM
+  #   = NEVER，即宿主 PATH），与 CommonAPI generator 的 HOST 定位一致。
+  # ================================================================
+  protobuf:
+    version: "3.21.12"
+    source:
+      url: "https://github.com/protocolbuffers/protobuf/releases/download/v21.12/protobuf-cpp-3.21.12.tar.gz"
+      sha256: "4eab9b524aa5913c6fffb20b2a8abf5ef7f95a80bc0701f3a6dbb4c607f73460"
+    license: BSD-3-Clause
+    boundary: TARGET
+    architecture: aarch64
+    linkage: static
+    patches: []
+    cmake:
+      options:
+        protobuf_BUILD_TESTS: "OFF"
+        protobuf_BUILD_EXAMPLES: "OFF"
+        protobuf_BUILD_SHARED_LIBS: "OFF"
+        # HOST protoc 来自 ci/Dockerfile；本 recipe 只产出 TARGET runtime。
+        protobuf_BUILD_PROTOC_BINARIES: "OFF"
+        protobuf_BUILD_LIBPROTOC: "OFF"
+        # zlib 仅用于 Gzip*Stream，TSP/SOMEIP 未使用；关闭以免依赖 sysroot
+        # 的 zlib dev（sysroot 同样只含 runtime）。
+        protobuf_WITH_ZLIB: "OFF"
+        # libprotobuf.a 会被链进 someip_proto / tsp_proto 等 PIC 静态库，
+        # 必须以 -fPIC 编译，否则下游共享目标链接失败。
+        CMAKE_POSITION_INDEPENDENT_CODE: "ON"
+
 cache:
   key_components:
     - platform_manifest_digest
