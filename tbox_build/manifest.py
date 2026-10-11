@@ -83,12 +83,31 @@ class ConfigValidation:
     check_command: str | None = None
 
 
+@dataclass(frozen=True)
+class AfterWaiver:
+    """A reviewed exemption from ``runtime.after`` ordering (CR-005, BUILD-REQ-051).
+
+    A waiver records that a declared ``kind: service`` build dependency
+    deliberately carries no systemd ordering edge. ``dependency`` is the
+    service id, ``unit`` its runtime systemd unit, and ``owner``/``reason``
+    the accountable party and the substantive justification. A waiver never
+    implies a ``Requires=`` exemption or a health-check exemption.
+    """
+
+    dependency: str
+    unit: str
+    owner: str
+    reason: str
+    review_condition: str | None = None
+
+
 @dataclass
 class RuntimeConfig:
     """Runtime configuration for a single service."""
 
     systemd_units: list[str] = field(default_factory=list)
     after: list[str] = field(default_factory=list)
+    after_waivers: list[AfterWaiver] = field(default_factory=list)
     health_check: str | None = None
     smoke_test: str | None = None
     config_paths: list[str] = field(default_factory=list)
@@ -724,10 +743,43 @@ def _parse_config_validation(data: dict[str, Any]) -> ConfigValidation | None:
     )
 
 
+def _parse_after_waiver(item: Any) -> AfterWaiver:
+    """Parse a single ``runtime.after_waivers`` entry (CR-005 §3.2).
+
+    The strict shape (required non-empty ``dependency``/``unit``/``owner``/
+    ``reason``, no unknown keys) is enforced by the JSON schema; the parser
+    normalizes the entry into an immutable internal structure and rejects
+    non-object elements early so a malformed manifest cannot silently drop a
+    waiver.
+    """
+    if not isinstance(item, dict):
+        raise SchemaValidationError(
+            "runtime.after_waivers entry must be an object with 'dependency', "
+            "'unit', 'owner' and 'reason'"
+        )
+    review = item.get("review_condition")
+    return AfterWaiver(
+        dependency=str(item.get("dependency", "")),
+        unit=str(item.get("unit", "")),
+        owner=str(item.get("owner", "")),
+        reason=str(item.get("reason", "")),
+        review_condition=str(review) if review is not None else None,
+    )
+
+
+def _parse_after_waivers(data: Any) -> list[AfterWaiver]:
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise SchemaValidationError("runtime.after_waivers must be an array")
+    return [_parse_after_waiver(item) for item in data]
+
+
 def _parse_runtime_config(data: dict[str, Any]) -> RuntimeConfig:
     return RuntimeConfig(
         systemd_units=list(data.get("systemd_units", [])),
         after=list(data.get("after", [])),
+        after_waivers=_parse_after_waivers(data.get("after_waivers")),
         health_check=data.get("health_check"),
         smoke_test=data.get("smoke_test"),
         config_paths=list(data.get("config_paths", [])),

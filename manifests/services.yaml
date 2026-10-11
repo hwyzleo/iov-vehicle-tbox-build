@@ -8,6 +8,7 @@
 services:
   tbox-hello-lib:
     description: "Minimal C++ shared library for BUILD v0.1-alpha self-verification"
+    kind: library
     repository: examples/minimal
     build:
       targets:
@@ -24,6 +25,7 @@ services:
 
   tbox-hello-cli:
     description: "Minimal C++ executable consuming tbox-hello-lib"
+    kind: service
     repository: examples/minimal
     build:
       targets:
@@ -267,8 +269,15 @@ services:
     runtime:
       systemd_units:
         - tbox-tsp.service
-      # TSP 在 MQTT 不可用时允许 DEGRADED 提供本地 IPC，不得自动生成 Requires=MQTT
+      # TSP 在 MQTT 不可用时允许 DEGRADED 提供本地 IPC，不得自动生成 Requires=MQTT（BUILD-REQ-051）。
+      # 该依赖为真实 service 依赖但刻意不建立 ordering，故以结构化豁免显式登记，
+      # 豁免不进入 ordering graph，也不生成 After=tbox-mqtt.service。
       after: []
+      after_waivers:
+        - dependency: mqtt
+          unit: tbox-mqtt.service
+          owner: tsp
+          reason: TSP supports DEGRADED local IPC when MQTT is unavailable
       health_check: tests/smoke/tsp-health.sh
       smoke_test: tests/smoke/tsp-fota-relay.sh
       config_paths:

@@ -149,9 +149,42 @@ properties:
                   minLength: 1
               after:
                 type: array
+                uniqueItems: true
                 items:
                   type: string
                   minLength: 1
+              # CR-005 BUILD-REQ-051: structured, auditable exemptions from
+              # after-ordering. Each entry pins a declared kind: service
+              # dependency that deliberately carries no ordering edge.
+              # Strict object: no additional properties, all four fields
+              # required and non-empty.
+              after_waivers:
+                type: array
+                uniqueItems: true
+                items:
+                  type: object
+                  required:
+                    - dependency
+                    - unit
+                    - owner
+                    - reason
+                  additionalProperties: false
+                  properties:
+                    dependency:
+                      type: string
+                      minLength: 1
+                    unit:
+                      type: string
+                      minLength: 1
+                    owner:
+                      type: string
+                      minLength: 1
+                    reason:
+                      type: string
+                      minLength: 1
+                    review_condition:
+                      type: string
+                      minLength: 1
               health_check:
                 type: string
               smoke_test:

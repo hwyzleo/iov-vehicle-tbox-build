@@ -15,6 +15,7 @@ invocation time.
 
 from __future__ import annotations
 
+import json
 import os
 import shlex
 import subprocess
@@ -33,6 +34,7 @@ from .manifest import (
     RetirementManifest,
 )
 from .graph import DependencyGraph
+from .ordering import ORDERING_DROPIN_DIR_REL, ORDERING_DROPIN_FILENAME
 from .staging import sha256_file
 
 
@@ -55,6 +57,7 @@ class DeployReport:
     started_at: str = ""
     finished_at: str = ""
     config_plan: dict[str, Any] | None = None
+    ordering_plan: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -262,6 +265,50 @@ class RetirePlanner:
         )
 
 
+# ---------------------------------------------------------------------------
+# BUILD-owned systemd ordering drop-in diff plan (CR-005 §6, BUILD-REQ-049)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class OrderingDropInAction:
+    """A single ordering drop-in install/remove decision."""
+
+    rel_path: str  # etc/systemd/system/<unit>.d/10-tbox-order.conf
+    target_path: str  # /etc/systemd/system/...
+    action: str  # install | remove
+    sha256: str | None = None
+    unit: str | None = None
+    after: list[str] = field(default_factory=list)
+
+
+@dataclass
+class OrderingDropInPlan:
+    """Release-to-release ordering drop-in diff (CR-005 §6).
+
+    The removal set is computed only from a previous *deployed* artifact
+    manifest: previous BUILD-owned drop-in set minus the target set. Without
+    a previous manifest the deployer never scans the device and never guesses
+    (BUILD-REQ-049): it reports that stale drop-ins cannot be safely removed.
+    """
+
+    install: list[OrderingDropInAction] = field(default_factory=list)
+    remove: list[OrderingDropInAction] = field(default_factory=list)
+    target_manifest_available: bool = True
+    previous_manifest_available: bool = False
+    warnings: list[str] = field(default_factory=list)
+
+    @property
+    def empty(self) -> bool:
+        return not self.install and not self.remove
+
+    def summary(self) -> str:
+        return (
+            f"{len(self.install)} install/replace, {len(self.remove)} remove, "
+            f"{len(self.warnings)} warning(s)"
+        )
+
+
 class Deployer:
     """Deploys a release package to a target device over SSH."""
 
@@ -278,6 +325,7 @@ class Deployer:
         rollback_on_failure: bool = True,
         smoke_settle_seconds: int = 3,
         platform: str = "orin",
+        previous_manifest: str | Path | None = None,
     ):
         self.project = project
         self.target_host = target_host
@@ -294,10 +342,15 @@ class Deployer:
         self.rollback_on_failure = rollback_on_failure
         self.smoke_settle_seconds = smoke_settle_seconds
         self.staging_platform = platform
+        # Previous deployed artifact manifest (local path). Required to compute
+        # the stale BUILD-owned ordering drop-in removal set (CR-005 §6).
+        self.previous_manifest = str(previous_manifest) if previous_manifest else None
         self._units: list[str] = []
         self._config_plan: ConfigDeployPlan | None = None
         self._retire_plan: RetirePlan | None = None
         self._retired_unit_states: dict[str, tuple[bool, bool]] = {}
+        self._ordering_plan: OrderingDropInPlan | None = None
+        self._ordering_previous: dict[str, bool] = {}
         self._control_path: str | None = None
         self._sudo_pw: str | None = None
         self._stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -515,6 +568,210 @@ class Deployer:
         except Exception:
             return sorted(present)
 
+    # -- BUILD-owned ordering drop-in diff (CR-005 §6) --------------------
+
+    @staticmethod
+    def _load_artifact_manifest(path: Path | str | None) -> dict[str, Any] | None:
+        if not path:
+            return None
+        candidate = Path(path)
+        if not candidate.is_file():
+            return None
+        try:
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _find_target_manifest(self, payload_root: Path) -> dict[str, Any] | None:
+        """Locate the target artifact manifest inside the extracted package."""
+        for cand in sorted(payload_root.parent.rglob("artifact-manifest.json")):
+            data = self._load_artifact_manifest(cand)
+            if data is not None:
+                return data
+        return None
+
+    @staticmethod
+    def _dropin_rel_from_artifact(artifact: dict[str, Any]) -> str | None:
+        path = artifact.get("path", "") or ""
+        if not path.endswith("/" + ORDERING_DROPIN_FILENAME):
+            return None
+        if path.startswith("rootfs/"):
+            return path[len("rootfs/"):]
+        return path
+
+    def _target_dropins(
+        self, payload_root: Path, manifest: dict[str, Any] | None
+    ) -> dict[str, dict[str, Any]]:
+        """Target BUILD-owned drop-in set from the target artifact manifest.
+
+        Falls back to a payload scan by the fixed file name when the manifest
+        is unavailable: the fixed name is by contract BUILD-owned, so this can
+        never misclassify a service-owned file.
+        """
+        result: dict[str, dict[str, Any]] = {}
+        if manifest:
+            for artifact in manifest.get("artifacts", []):
+                rel = self._dropin_rel_from_artifact(artifact)
+                if rel is not None:
+                    result[rel] = artifact
+            if result:
+                return result
+        base = payload_root / ORDERING_DROPIN_DIR_REL
+        if base.is_dir():
+            for found in sorted(base.glob(f"*.d/{ORDERING_DROPIN_FILENAME}")):
+                rel = found.relative_to(payload_root).as_posix()
+                result[rel] = {
+                    "path": f"rootfs/{rel}",
+                    "sha256": sha256_file(found),
+                }
+        return result
+
+    def _owned_dropins(
+        self, manifest: dict[str, Any] | None
+    ) -> dict[str, dict[str, Any]]:
+        """BUILD-owned drop-in set from an artifact manifest.
+
+        Only entries explicitly marked ``build_owned`` are eligible for stale
+        removal; an unmarked or unavailable manifest yields no removal.
+        """
+        result: dict[str, dict[str, Any]] = {}
+        if not manifest:
+            return result
+        for artifact in manifest.get("artifacts", []):
+            if not artifact.get("build_owned"):
+                continue
+            rel = self._dropin_rel_from_artifact(artifact)
+            if rel is not None:
+                result[rel] = artifact
+        return result
+
+    def _build_ordering_plan(
+        self, payload_root: Path, manifest: dict[str, Any] | None
+    ) -> OrderingDropInPlan:
+        """Compute the install/remove diff for BUILD-owned drop-ins.
+
+        Install set: target artifact manifest entries (hash-verified against
+        the payload). Remove set: previous deployed manifest's BUILD-owned
+        drop-in set minus the target set. Without a previous manifest BUILD
+        never scans or guesses (BUILD-REQ-049): it reports that stale drop-ins
+        cannot be safely removed.
+        """
+        plan = OrderingDropInPlan()
+        if manifest is None:
+            plan.target_manifest_available = False
+            plan.warnings.append(
+                "target artifact manifest unavailable; ordering drop-ins are "
+                "derived from the payload by fixed file name"
+            )
+        target = self._target_dropins(payload_root, manifest)
+        for rel, artifact in sorted(target.items()):
+            local = payload_root / rel
+            if not local.is_file():
+                plan.warnings.append(
+                    f"ordering drop-in {rel} is declared in the target "
+                    f"manifest but missing from the package payload"
+                )
+                continue
+            digest = sha256_file(local)
+            expected = artifact.get("sha256")
+            if expected and expected != digest:
+                plan.warnings.append(
+                    f"ordering drop-in {rel} hash mismatch "
+                    f"(manifest={str(expected)[:16]}..., "
+                    f"payload={digest[:16]}...); not installed"
+                )
+                continue
+            plan.install.append(OrderingDropInAction(
+                rel_path=rel,
+                target_path="/" + rel,
+                action="install",
+                sha256=digest,
+                after=list(artifact.get("after_ordering") or []),
+            ))
+
+        if not self.previous_manifest:
+            plan.warnings.append(
+                "previous artifact manifest not provided; stale BUILD-owned "
+                "ordering drop-ins cannot be safely removed "
+                "(pass --previous-manifest)"
+            )
+            return plan
+        previous = self._load_artifact_manifest(self.previous_manifest)
+        if previous is None:
+            plan.warnings.append(
+                f"previous artifact manifest could not be loaded: "
+                f"{self.previous_manifest}; stale drop-ins not removed"
+            )
+            return plan
+        plan.previous_manifest_available = True
+        target_rels = set(target)
+        for rel, artifact in sorted(self._owned_dropins(previous).items()):
+            if rel in target_rels:
+                continue
+            plan.remove.append(OrderingDropInAction(
+                rel_path=rel,
+                target_path="/" + rel,
+                action="remove",
+                sha256=artifact.get("sha256"),
+            ))
+        return plan
+
+    @staticmethod
+    def _install_dropin_script(remote_src: str, target: str) -> str:
+        return (
+            f"install -D -m 0644 {shlex.quote(remote_src)} {shlex.quote(target)}"
+        )
+
+    @staticmethod
+    def _remove_dropin_script(target: str) -> str:
+        # Idempotence via an existence guard; a real failure (permission,
+        # read-only fs) must keep a non-zero rc so rollback stays reachable.
+        q = shlex.quote(target)
+        return f"if [ -e {q} ]; then rm -f -- {q}; fi"
+
+    def _run_ordering_dropins(self, step: DeployStep) -> DeployStep:
+        """Execute the ordering-dropins step (CR-005 §6).
+
+        Records whether each target drop-in existed before install so a
+        rollback can remove drop-ins newly created by this deployment.
+        """
+        start = time.time()
+        plan = self._ordering_plan or OrderingDropInPlan()
+        lines: list[str] = []
+        failed = False
+        previously: dict[str, bool] = {}
+        for act in plan.install:
+            q = shlex.quote(act.target_path)
+            _, probe = self._run(self._ssh_str(self._sudo_sh(
+                f"[ -e {q} ] && echo present || echo absent")))
+            previously[act.rel_path] = "present" in probe
+            remote_src = f"{self.remote_stage}/rootfs/{act.rel_path}"
+            rc, out = self._run(self._ssh_str(self._sudo_sh(
+                self._install_dropin_script(remote_src, act.target_path))))
+            lines.append(f"install {act.target_path}: rc={rc}")
+            if rc != 0:
+                failed = True
+                lines.append(
+                    f"install {act.target_path}: FAILED {out.strip()[:200]}"
+                )
+        for act in plan.remove:
+            rc, out = self._run(self._ssh_str(self._sudo_sh(
+                self._remove_dropin_script(act.target_path))))
+            lines.append(f"remove {act.target_path}: rc={rc}")
+            if rc != 0:
+                failed = True
+                lines.append(
+                    f"remove {act.target_path}: FAILED {out.strip()[:200]}"
+                )
+        self._ordering_previous = previously
+        step.duration_seconds = time.time() - start
+        step.status = "failed" if failed else "success"
+        step.message = "; ".join(lines) if lines else "no ordering drop-in changes"
+        if plan.warnings:
+            step.message += " | " + "; ".join(plan.warnings)
+        return step
+
     # -- plan -------------------------------------------------------------
 
     def build_plan(self, package_path: Path, payload_root: Path) -> list[DeployStep]:
@@ -542,6 +799,11 @@ class Deployer:
             if rm is not None else RetirePlan(platform=self.staging_platform)
         retire_plan = self._retire_plan
 
+        # Compute the BUILD-owned ordering drop-in diff (CR-005 §6).
+        target_manifest = self._find_target_manifest(payload_root)
+        self._ordering_plan = self._build_ordering_plan(payload_root, target_manifest)
+        ordering_plan = self._ordering_plan
+
         # Backup extras: retired unit fragment paths (device-resolved so a
         # rollback can restore the unit file) and retired paths (guarded by
         # existence so missing targets are successful no-ops).
@@ -553,6 +815,10 @@ class Deployer:
             )
         for act in retire_plan.paths:
             q = shlex.quote(act.path)
+            backup_extras.append(f"$(test -e {q} && echo {q})")
+        # Stale BUILD-owned ordering drop-ins being removed must be restorable.
+        for act in ordering_plan.remove:
+            q = shlex.quote(act.target_path)
             backup_extras.append(f"$(test -e {q} && echo {q})")
         extra_str = (" " + " ".join(backup_extras)) if backup_extras else ""
 
@@ -606,9 +872,12 @@ class Deployer:
                      if retire_cmds else "no retirements declared"),
         ))
         # install: base rsync excludes etc/tbox/** so configs are policy-driven
+        # and excludes the BUILD-owned ordering drop-ins, which are installed
+        # explicitly by the ordering-dropins step below (CR-005 §6).
         steps.append(DeployStep("install", commands=[
             " ".join(shlex.quote(c) for c in self._ssh_cmd(
                 self._sudo(f"rsync -a --exclude=etc/tbox/** "
+                           f"--exclude='{ORDERING_DROPIN_DIR_REL}/*.d/{ORDERING_DROPIN_FILENAME}' "
                            f"{self.remote_stage}/rootfs/ /"))),
         ]))
         # config-install: per-file policy-aware install (CR-003 §7.2 steps 4-7)
@@ -629,6 +898,35 @@ class Deployer:
                                 message=f"{config_plan.replace_count} replace, "
                                         f"{config_plan.create_count} create_if_missing, "
                                         f"{config_plan.preserve_count} preserve (skipped)"))
+        # ordering-dropins (CR-005 §6): install/replace the target BUILD-owned
+        # drop-ins explicitly and remove only drop-ins present in the previous
+        # deployed artifact manifest but absent from the target manifest.
+        # Missing removal targets are successful no-ops; the whole <unit>.d
+        # directory is never wildcard-deleted.
+        ordering_cmds: list[str] = []
+        for act in ordering_plan.install:
+            after_note = f" after={' '.join(act.after)}" if act.after else ""
+            ordering_cmds.append(
+                f"# install BUILD-owned drop-in {act.target_path}{after_note}"
+            )
+            ordering_cmds.append(" ".join(shlex.quote(c) for c in self._ssh_cmd(
+                self._sudo_sh(self._install_dropin_script(
+                    f"{self.remote_stage}/rootfs/{act.rel_path}",
+                    act.target_path)))))
+        for act in ordering_plan.remove:
+            ordering_cmds.append(
+                f"# remove stale BUILD-owned drop-in {act.target_path} "
+                f"(absent from target manifest)"
+            )
+            ordering_cmds.append(" ".join(shlex.quote(c) for c in self._ssh_cmd(
+                self._sudo_sh(self._remove_dropin_script(act.target_path)))))
+        ordering_msg = ordering_plan.summary()
+        if ordering_plan.warnings:
+            ordering_msg += " | " + "; ".join(ordering_plan.warnings)
+        if ordering_plan.empty:
+            ordering_msg = "no ordering drop-in changes; " + ordering_msg
+        steps.append(DeployStep("ordering-dropins", commands=ordering_cmds,
+                                message=ordering_msg))
         steps.append(DeployStep("ldconfig", commands=[
             " ".join(shlex.quote(c) for c in self._ssh_cmd(self._sudo("ldconfig"))),
         ]))
@@ -772,6 +1070,18 @@ class Deployer:
                     report.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                     return report
 
+            # Record the BUILD-owned ordering drop-in diff in the report
+            # (CR-005 §6) for dry-run and execution traceability.
+            if self._ordering_plan is not None:
+                report.ordering_plan = {
+                    "summary": self._ordering_plan.summary(),
+                    "target_manifest_available": self._ordering_plan.target_manifest_available,
+                    "previous_manifest_available": self._ordering_plan.previous_manifest_available,
+                    "install": [asdict(a) for a in self._ordering_plan.install],
+                    "remove": [asdict(a) for a in self._ordering_plan.remove],
+                    "warnings": list(self._ordering_plan.warnings),
+                }
+
             if not do_execute:
                 for step in plan:
                     step.status = "planned"
@@ -821,6 +1131,18 @@ class Deployer:
                             report.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
                             return report
                         continue
+                    if step.name == "ordering-dropins":
+                        # Structured BUILD-owned drop-in install/remove (CR-005 §6).
+                        step = self._run_ordering_dropins(step)
+                        report.steps.append(step)
+                        if step.status == "failed":
+                            report.status = "failed"
+                            report.errors.append(f"ordering-dropins: {step.message}")
+                            if self.rollback_on_failure and backed_up:
+                                report.steps.append(self._rollback())
+                            report.finished_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                            return report
+                        continue
                     start = time.time()
                     failed = False
                     for cmd in step.commands:
@@ -841,6 +1163,7 @@ class Deployer:
                         if (self.rollback_on_failure and backed_up
                                 and step.name in ("retire", "install",
                                                   "config-install",
+                                                  "ordering-dropins",
                                                   "ldconfig",
                                                   "daemon-reload",
                                                   "restart")):
@@ -876,6 +1199,13 @@ class Deployer:
                 f"systemctl {'start' if active else 'stop'} {q} "
                 f"2>/dev/null || true"
             )
+        # Remove BUILD-owned ordering drop-ins newly created by this deploy:
+        # they were absent before, so the backup archive cannot restore them
+        # (CR-005 §6 rollback).
+        for rel, existed in sorted(self._ordering_previous.items()):
+            if existed:
+                continue
+            restore.append(f"rm -f -- {shlex.quote('/' + rel)}")
         if restore:
             script += " && " + " && ".join(restore)
         cmds = [

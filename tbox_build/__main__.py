@@ -231,6 +231,7 @@ def cmd_deploy(args: argparse.Namespace) -> int:
         ask_pass=args.ask_pass,
         ask_sudo_pass=args.ask_sudo_pass,
         rollback_on_failure=not args.no_rollback,
+        previous_manifest=getattr(args, "previous_manifest", None),
     )
 
     package_path = Path(args.package)
@@ -449,6 +450,10 @@ def main(argv: list[str] | None = None) -> int:
                           help="Force dry-run (print the command plan; overrides --execute)")
     p_deploy.add_argument("--rollback", default=None, metavar="BACKUP",
                           help="Roll back the device to the given on-device backup archive path")
+    p_deploy.add_argument("--previous-manifest", default=None, metavar="PATH",
+                          help="Previous deployed artifact-manifest.json; used to "
+                               "compute stale BUILD-owned ordering drop-in removals "
+                               "(CR-005). Without it stale drop-ins are never guessed.")
     p_deploy.set_defaults(func=cmd_deploy)
 
     # verify

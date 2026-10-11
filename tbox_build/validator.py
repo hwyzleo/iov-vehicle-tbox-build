@@ -103,6 +103,12 @@ def validate_library_kind(manifest: ServiceManifest) -> None:
                 f"Service '{svc.id}' is kind: library but declares "
                 f"runtime.after ordering (libraries have no daemon ordering)"
             )
+        if svc.runtime.after_waivers:
+            violations.append(
+                f"Service '{svc.id}' is kind: library but declares "
+                f"runtime.after_waivers (libraries have no daemon ordering "
+                f"to waive)"
+            )
         if svc.runtime.health_check:
             violations.append(
                 f"Service '{svc.id}' is kind: library but declares "
@@ -165,28 +171,251 @@ def validate_source_dirs(manifest: ServiceManifest, project_root: Path) -> None:
         )
 
 
-def validate_systemd_references(manifest: ServiceManifest) -> None:
-    """Ensure every ``after`` entry references a declared or well-known unit."""
-    declared_units: set[str] = set()
-    for svc in manifest:
-        declared_units.update(svc.runtime.systemd_units)
+def _find_ordering_cycles(edges: dict[str, list[str]]) -> list[list[str]]:
+    """Detect cycles in a unit-level systemd ordering graph.
 
-    violations: list[str] = []
+    ``edges[u]`` is the list of units that ``u`` is ordered ``After=``. The
+    graph is small (one node per declared unit), so a recursive DFS with
+    tri-color marking is sufficient. Returns one representative node path per
+    cycle, with the cycle entry repeated at the end for readability.
+    """
+    WHITE, GRAY, BLACK = 0, 1, 2
+    color: dict[str, int] = {n: WHITE for n in edges}
+    stack: list[str] = []
+    cycles: list[list[str]] = []
+
+    def visit(node: str) -> None:
+        color[node] = GRAY
+        stack.append(node)
+        for nxt in edges.get(node, []):
+            if nxt not in color:
+                color[nxt] = WHITE
+                edges.setdefault(nxt, [])
+            if color[nxt] == GRAY:
+                idx = stack.index(nxt)
+                cycles.append(stack[idx:] + [nxt])
+            elif color[nxt] == WHITE:
+                visit(nxt)
+        stack.pop()
+        color[node] = BLACK
+
+    for node in list(edges):
+        if color.get(node) == WHITE:
+            visit(node)
+
+    # Deduplicate cycles that differ only by rotation reported through
+    # different DFS entry points.
+    seen: set[frozenset[str]] = set()
+    unique: list[list[str]] = []
+    for cyc in cycles:
+        key = frozenset(cyc)
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(cyc)
+    return unique
+
+
+def validate_systemd_references(manifest: ServiceManifest) -> list[str]:
+    """Validate the runtime ordering contract (CR-005, BUILD-REQ-049~051).
+
+    Four steps over the declared service set:
+
+    1. **Index**: build ``service id -> runtime systemd units`` and
+       ``unit -> owning service``. A unit declared by two services is an
+       ambiguous mapping and is rejected.
+    2. **Forward references**: every ``runtime.after`` entry must be a
+       declared unit or a well-known external target; duplicate entries and
+       self-dependency are rejected.
+    3. **Reverse completeness + waivers**: every declared service dependency
+       that is not ``kind: library`` must resolve to exactly one runtime unit
+       (zero/multiple units is an ambiguous mapping) and that unit must be
+       covered by ``after`` or a valid structured waiver. Waivers must target
+       a declared, non-library dependency, match its resolved unit, carry a
+       non-blank owner/reason, and must not conflict with, or duplicate,
+       any other declaration.
+    4. **Graph**: the unit-level graph built from the *actual* ``after`` edges
+       must be acyclic. Waivers never enter the ordering graph.
+
+    Returns non-fatal diagnostic warnings (e.g. a recorded waiver). Raises
+    :class:`ValidationFailure` on any violation.
+    """
+    warnings: list[str] = []
+    errors: list[str] = []
+
+    # --- 1. index ---------------------------------------------------------
+    unit_owner: dict[str, str] = {}
     for svc in manifest:
+        seen_units: set[str] = set()
+        for unit in svc.runtime.systemd_units:
+            if unit in seen_units:
+                errors.append(
+                    f"Service '{svc.id}' declares duplicate systemd unit "
+                    f"'{unit}'"
+                )
+                continue
+            seen_units.add(unit)
+            prior = unit_owner.get(unit)
+            if prior is not None and prior != svc.id:
+                errors.append(
+                    f"systemd unit '{unit}' is declared by both '{prior}' and "
+                    f"'{svc.id}' (ambiguous unit-to-service mapping)"
+                )
+            else:
+                unit_owner[unit] = svc.id
+
+    # --- 2. forward references -------------------------------------------
+    for svc in manifest:
+        own_units = set(svc.runtime.systemd_units)
+        seen_after: set[str] = set()
         for after_unit in svc.runtime.after:
-            if after_unit in declared_units:
+            if after_unit in seen_after:
+                errors.append(
+                    f"Service '{svc.id}' lists duplicate unit '{after_unit}' "
+                    f"in runtime.after"
+                )
                 continue
-            if after_unit in _SYSTEMD_EXTERNAL_TARGETS:
+            seen_after.add(after_unit)
+            if after_unit in own_units:
+                errors.append(
+                    f"Service '{svc.id}' runtime.after must not reference its "
+                    f"own unit '{after_unit}' (self-dependency)"
+                )
+            elif after_unit in unit_owner:
                 continue
-            violations.append(
-                f"Service '{svc.id}' references unknown systemd unit "
-                f"'{after_unit}' in runtime.after"
+            elif after_unit in _SYSTEMD_EXTERNAL_TARGETS:
+                continue
+            else:
+                errors.append(
+                    f"Service '{svc.id}' references unknown systemd unit "
+                    f"'{after_unit}' in runtime.after"
+                )
+
+    def resolve_dependency_unit(dep_id: str, context: str) -> str | None:
+        """Resolve a non-library dependency to its unique runtime unit."""
+        dep = manifest.get(dep_id)
+        if dep is None:
+            errors.append(f"{context}: missing service dependency '{dep_id}'")
+            return None
+        units = dep.runtime.systemd_units
+        if len(units) == 0:
+            errors.append(
+                f"{context}: dependency '{dep_id}' declares no runtime "
+                f"systemd unit (ambiguous mapping; ordering cannot be inferred)"
             )
-    if violations:
-        raise ValidationFailure(
-            f"systemd unit reference validation failed ({len(violations)} violation(s))",
-            violations,
+            return None
+        if len(units) > 1:
+            errors.append(
+                f"{context}: dependency '{dep_id}' declares multiple runtime "
+                f"systemd units {units} (ambiguous mapping; no primary unit "
+                f"declared)"
+            )
+            return None
+        return units[0]
+
+    # --- 3. waivers + reverse completeness -------------------------------
+    for svc in manifest:
+        declared_deps = set(svc.build.service_dependencies)
+        after_set = set(svc.runtime.after)
+        waived_units: dict[str, str] = {}  # unit -> dependency id
+        seen_waiver_keys: set[tuple[str, str]] = set()
+
+        for waiver in svc.runtime.after_waivers:
+            key = (waiver.dependency, waiver.unit)
+            if key in seen_waiver_keys:
+                errors.append(
+                    f"Service '{svc.id}' has a duplicate after_waiver for "
+                    f"dependency '{waiver.dependency}' unit '{waiver.unit}'"
+                )
+                continue
+            seen_waiver_keys.add(key)
+
+            if not waiver.owner.strip() or not waiver.reason.strip():
+                errors.append(
+                    f"Service '{svc.id}' after_waiver for '{waiver.dependency}' "
+                    f"requires a non-blank owner and reason"
+                )
+            if waiver.dependency not in declared_deps:
+                errors.append(
+                    f"Service '{svc.id}' after_waiver references dependency "
+                    f"'{waiver.dependency}' which is not a declared "
+                    f"service_dependency (orphan waiver)"
+                )
+                continue
+            dep = manifest.get(waiver.dependency)
+            if dep is None:
+                continue  # reported by service_dependencies validation
+            if dep.is_library:
+                errors.append(
+                    f"Service '{svc.id}' after_waiver references library "
+                    f"dependency '{waiver.dependency}' (libraries have no "
+                    f"runtime ordering to waive)"
+                )
+                continue
+
+            resolved = resolve_dependency_unit(
+                waiver.dependency, f"Service '{svc.id}' after_waiver"
+            )
+            if resolved is None:
+                continue
+            if waiver.unit != resolved:
+                errors.append(
+                    f"Service '{svc.id}' after_waiver unit '{waiver.unit}' "
+                    f"does not match dependency '{waiver.dependency}' runtime "
+                    f"unit '{resolved}'"
+                )
+                continue
+            if waiver.unit in after_set:
+                errors.append(
+                    f"Service '{svc.id}' declares unit '{waiver.unit}' in both "
+                    f"runtime.after and after_waivers"
+                )
+                continue
+
+            waived_units[waiver.unit] = waiver.dependency
+            warnings.append(
+                f"Service '{svc.id}' waives after-ordering for dependency "
+                f"'{waiver.dependency}' (unit '{waiver.unit}', "
+                f"owner={waiver.owner}): {waiver.reason}"
+            )
+
+        for dep_id in sorted(declared_deps):
+            dep = manifest.get(dep_id)
+            if dep is None or dep.is_library:
+                continue
+            resolved = resolve_dependency_unit(dep_id, f"Service '{svc.id}'")
+            if resolved is None:
+                continue
+            if resolved in after_set:
+                continue
+            if resolved in waived_units:
+                continue
+            errors.append(
+                f"Service '{svc.id}' service dependency '{dep_id}' (unit "
+                f"'{resolved}') is neither in runtime.after nor covered by a "
+                f"valid after_waiver"
+            )
+
+    # --- 4. ordering graph -----------------------------------------------
+    edges: dict[str, list[str]] = {}
+    for svc in manifest:
+        for unit in svc.runtime.systemd_units:
+            edges.setdefault(unit, [])
+            for after_unit in svc.runtime.after:
+                if after_unit in unit_owner:
+                    edges[unit].append(after_unit)
+    for cycle in _find_ordering_cycles(edges):
+        errors.append(
+            "runtime.after ordering cycle: " + " -> ".join(cycle)
         )
+
+    if errors:
+        raise ValidationFailure(
+            f"systemd unit reference validation failed "
+            f"({len(errors)} violation(s))",
+            errors,
+        )
+    return warnings
 
 
 def validate_health_smoke(manifest: ServiceManifest, project_root: Path) -> None:
@@ -872,8 +1101,8 @@ def validate_all(
     # 5. source_dir existence / workspace boundary / CMake project
     validate_source_dirs(manifest, project_root)
 
-    # 6. systemd unit references
-    validate_systemd_references(manifest)
+    # 6. systemd unit references + ordering/completeness/waiver contract
+    warnings.extend(validate_systemd_references(manifest))
 
     # 7. health/smoke script existence
     validate_health_smoke(manifest, project_root)

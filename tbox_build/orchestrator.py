@@ -36,6 +36,7 @@ from .manifest import (
     InstallComponent,
     ConfigDeploymentManifest,
 )
+from .ordering import OrderingDropIn, materialize_systemd_ordering
 from .schema import validate_service_manifest, validate_release_set_manifest
 from .staging import StagingDir, sha256_file
 from .validator import validate_all
@@ -203,6 +204,7 @@ class BuildOrchestrator:
         self.config = config or BuildConfig()
         self.staging = StagingDir(project.root, self.config.platform, self.config.profile)
         self._overlay_report: OverlayReport | None = None
+        self._ordering_dropins: list[OrderingDropIn] = []
 
     # -- manifest loading and validation ----------------------------------
 
@@ -807,6 +809,32 @@ class BuildOrchestrator:
                 result.append(line)
         return "\n".join(result) + ("\n" if content.endswith("\n") else "")
 
+    # -- BUILD-owned systemd ordering drop-ins (CR-005) ------------------
+
+    def _materialize_ordering(
+        self, service_manifest: ServiceManifest
+    ) -> list[OrderingDropIn]:
+        """Compile runtime.after into BUILD-owned drop-ins under install-root.
+
+        Runs after the service runtime components and the platform overlay
+        have been staged (so an existing same-path file is detected and the
+        build fails rather than overwriting it) and before the artifact
+        manifest is generated (so every drop-in is recorded).
+        """
+        print("\n=== Materializing BUILD-owned systemd ordering drop-ins ===")
+        self._ordering_dropins = materialize_systemd_ordering(
+            self.staging.install_root, service_manifest
+        )
+        for drop_in in self._ordering_dropins:
+            print(
+                f"  {drop_in.rel_path} (owner=build, "
+                f"source={drop_in.source_service}, "
+                f"after={' '.join(drop_in.after) or '(none)'})"
+            )
+        if not self._ordering_dropins:
+            print("  no non-empty runtime.after declarations")
+        return self._ordering_dropins
+
     def _prepare_target_dependencies(
         self, graph: DependencyGraph, service_ids: list[str]
     ) -> list[str]:
@@ -1092,6 +1120,13 @@ class BuildOrchestrator:
                     # they do not change single-service runtime semantics.
                     self._stage_platform_assets(service_manifest)
 
+                    # 6.8 Materialize BUILD-owned systemd ordering drop-ins
+                    # (CR-005, BUILD-REQ-049). Each non-empty runtime.after is
+                    # compiled into a fixed-named drop-in under install-root
+                    # etc/systemd/system/<unit>.d/. Original service units are
+                    # never rewritten.
+                    self._materialize_ordering(service_manifest)
+
                     print("\n=== Generating artifact manifest ===")
                     artifact_manifest = self._generate_artifact_manifest(
                         service_manifest, lock, git_commit, report.service_results
@@ -1196,6 +1231,10 @@ class BuildOrchestrator:
         if self._overlay_report is not None:
             for entry in self._overlay_report.entries:
                 overlay_by_rel[f"rootfs/{entry.rel_path}"] = entry
+        # BUILD-owned ordering drop-ins by install-root-relative key (CR-005).
+        ordering_by_rel: dict[str, OrderingDropIn] = {
+            f"rootfs/{d.rel_path}": d for d in self._ordering_dropins
+        }
         # Schema-check status by service -> target_path
         schema_status: dict[str, str] = {}
         secret_ok = True
@@ -1205,8 +1244,17 @@ class BuildOrchestrator:
             secret_ok = self._overlay_report.validation_summary.get("secret_findings", 0) == 0
 
         for staged in self.staging.scan_files():
+            ordering = ordering_by_rel.get(staged.rel_path)
             owner_info = file_owners.get(staged.rel_path)
-            if owner_info:
+            if ordering is not None:
+                # BUILD owns the generated drop-in; the source service is
+                # recorded separately (CR-005 §5.3/§9).
+                svc_id = "build"
+                target = ordering.source_service
+                version = "0.1.0"
+                component = "build-ordering"
+                staging = "rootfs"
+            elif owner_info:
                 svc_id, target, version, component, staging = owner_info
             else:
                 svc_id, target, version, component, staging = (
@@ -1225,6 +1273,13 @@ class BuildOrchestrator:
                     config_schema_check=schema_status.get(svc_id) if svc_id != "unknown" else None,
                     config_secret_scan="pass" if secret_ok else "fail",
                 )
+            if ordering is not None:
+                kw.update(
+                    build_owned=True,
+                    source_service=ordering.source_service,
+                    after_ordering=list(ordering.after),
+                    mode="0644",
+                )
             manifest.add_staged_file(
                 staged,
                 owner_service=svc_id,
@@ -1235,6 +1290,19 @@ class BuildOrchestrator:
                 staging=staging,
                 **kw,
             )
+
+        # Packaging self-check: every materialized drop-in must be recorded in
+        # the artifact manifest with build ownership (CR-005 §5.3).
+        recorded = {
+            entry.path for entry in manifest.entries if entry.build_owned
+        }
+        for drop_in in self._ordering_dropins:
+            key = f"rootfs/{drop_in.rel_path}"
+            if key not in recorded:
+                raise BuildFailure(
+                    f"ordering drop-in {drop_in.rel_path} was materialized but "
+                    f"is missing from the artifact manifest"
+                )
 
         manifest.check_conflicts()
         return manifest

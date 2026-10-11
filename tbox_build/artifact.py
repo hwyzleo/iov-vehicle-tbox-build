@@ -53,6 +53,11 @@ class ArtifactEntry:
     config_overlaid: bool | None = None
     config_schema_check: str | None = None
     config_secret_scan: str | None = None
+    # BUILD-owned systemd ordering drop-in provenance (CR-005 §5.3/§9).
+    build_owned: bool = False
+    source_service: str | None = None
+    after_ordering: list[str] | None = None
+    mode: str | None = None
 
 
 class ArtifactManifest:
@@ -104,6 +109,10 @@ class ArtifactManifest:
         config_overlaid: bool | None = None,
         config_schema_check: str | None = None,
         config_secret_scan: str | None = None,
+        build_owned: bool = False,
+        source_service: str | None = None,
+        after_ordering: list[str] | None = None,
+        mode: str | None = None,
     ) -> None:
         """Add a staged file to the manifest, classifying and inspecting it."""
         cls = classify_file(staged.full_path)
@@ -131,6 +140,10 @@ class ArtifactManifest:
             config_overlaid=config_overlaid,
             config_schema_check=config_schema_check,
             config_secret_scan=config_secret_scan,
+            build_owned=build_owned,
+            source_service=source_service,
+            after_ordering=after_ordering,
+            mode=mode,
         )
         self.add_entry(entry)
 
