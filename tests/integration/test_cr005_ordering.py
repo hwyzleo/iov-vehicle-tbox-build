@@ -36,7 +36,9 @@ class TestRealManifestContract:
     def test_tsp_waiver_targets_mqtt_unit(self, project_root: Path):
         project = Project(project_root)
         tsp = project.load_service_manifest().get("tsp")
-        assert tsp.runtime.after == []
+        # TSP orders after SEC (real runtime dependency, TBOX-TSP-DSN-CR-010
+        # §3.2) while the MQTT dependency stays waived for DEGRADED operation.
+        assert tsp.runtime.after == ["tbox-sec.service"]
         assert len(tsp.runtime.after_waivers) == 1
         waiver = tsp.runtime.after_waivers[0]
         assert waiver.dependency == "mqtt"
@@ -57,9 +59,9 @@ class TestMaterializeRealServices:
 
     def test_expected_dropin_set(self, project_root: Path, tmp_path: Path):
         _, by_service = self._materialize(project_root, tmp_path)
-        # sec/diag/mqtt/someip declare ordering; tsp is waived; framework and
-        # the hello services have no ordering.
-        assert set(by_service) == {"sec", "diag", "mqtt", "someip"}
+        # sec/diag/mqtt/someip/tsp declare ordering; framework and the hello
+        # services have no ordering.
+        assert set(by_service) == {"sec", "diag", "mqtt", "someip", "tsp"}
 
     def test_mqtt_dropin_is_deterministic_and_minimal(
         self, project_root: Path, tmp_path: Path
@@ -70,11 +72,20 @@ class TestMaterializeRealServices:
         assert "Requires=" not in content
         assert "Wants=" not in content
 
-    def test_waived_tsp_has_no_dropin(self, project_root: Path, tmp_path: Path):
+    def test_waived_tsp_dependency_absent_from_dropin(
+        self, project_root: Path, tmp_path: Path
+    ):
+        """A waived dependency must never reach the generated After= line.
+
+        TSP orders after SEC but waives MQTT, so its drop-in must list
+        tbox-sec.service and must not mention tbox-mqtt.service.
+        """
         orch, _ = self._materialize(project_root, tmp_path)
-        assert not (
-            orch.staging.install_root / dropin_rel_path("tbox-tsp.service")
-        ).exists()
+        dropin = orch.staging.install_root / dropin_rel_path("tbox-tsp.service")
+        assert dropin.exists()
+        content = dropin.read_text()
+        assert content == "[Unit]\nAfter=tbox-sec.service\n"
+        assert "tbox-mqtt.service" not in content
 
     def test_materialized_set_is_build_owned_in_artifact_manifest(
         self, project_root: Path, tmp_path: Path

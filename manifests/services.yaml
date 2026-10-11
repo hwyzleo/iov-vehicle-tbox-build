@@ -251,10 +251,15 @@ services:
       targets:
         - tbox_tsp
         - tbox_tsp_client
-      # CR-007 §8: framework 是 library（无 unit）；TSP 消费 tbox::mqtt_client，
-      # PROV/SEC 仅由 MQTT 构建闭包带入，不登记为 TSP 直接 service dependency。
+      # CR-007 §8: framework 是 library（无 unit）；TSP 消费 tbox::mqtt_client。
+      # TBOX-TSP-DSN-CR-010 §3.2 / TBOX-SEC-DSN-CR-019: TSP 新增直接消费
+      # tbox::sec_client（V2C keyprov 业务密钥状态查询 + Wrapped Key 原子导入），
+      # 其 CMakeLists.txt 对 TboxSecClient 为 CONFIG REQUIRED，故 sec 必须登记为
+      # 直接 service dependency（否则 SDK 不进 prefix_path，configure 失败）。
+      # PROV 仍仅由 MQTT/SEC 构建闭包带入，不登记为 TSP 直接依赖。
       service_dependencies:
         - framework
+        - sec
         - mqtt
       # protobuf: TSP 自备 proto（proto/vehicle/common/v1/envelope.proto）并经
       # pkg_check_modules(protobuf) 链接 TARGET runtime（CR-009）。
@@ -272,7 +277,12 @@ services:
       # TSP 在 MQTT 不可用时允许 DEGRADED 提供本地 IPC，不得自动生成 Requires=MQTT（BUILD-REQ-051）。
       # 该依赖为真实 service 依赖但刻意不建立 ordering，故以结构化豁免显式登记，
       # 豁免不进入 ordering graph，也不生成 After=tbox-mqtt.service。
-      after: []
+      #
+      # SEC 则登记真实 ordering：TSP 的 keyprov 适配器在每次业务调用前惰性重连
+      # （sec_business_key_adapter.cpp:48/58/67），SEC 缺失时 keyprov 保持 NOT_READY
+      # 不阻塞启动，但 SEC 是真实运行期依赖，按 someip 先例登记 After= 以减少启动抖动。
+      after:
+        - tbox-sec.service
       after_waivers:
         - dependency: mqtt
           unit: tbox-mqtt.service
