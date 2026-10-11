@@ -219,7 +219,14 @@ services:
     runtime:
       systemd_units:
         - tbox-mqtt.service
-      after: []
+      # MQTT 启动时经 framework-ipc 连接 tbox-prov.sock 与 tbox-sec.sock
+      # （身份绑定 + profile=mqtt 的 TLS 凭据）。与 SEC/DIAG 不同，连接失败
+      # 不会让 initialize 返回 false，而是降级进入 PROV_WAIT / CERT_WAIT
+      # （MQTT-1009 / MQTT-1001）并保持本地 IPC 可用，因此不得生成
+      # Requires=；但这是真实启动顺序依赖，必须登记为 after。
+      after:
+        - tbox-prov.service
+        - tbox-sec.service
       health_check: tests/smoke/mqtt-health.sh
       smoke_test: tests/smoke/mqtt-broker.sh
       config_paths:
