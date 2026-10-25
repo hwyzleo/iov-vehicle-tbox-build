@@ -98,3 +98,54 @@ class TestMaterializeRealServices:
         owned = {e.path for e in artifact_manifest.entries if e.build_owned}
         for record in by_service.values():
             assert f"rootfs/{record.rel_path}" in owned
+
+    def test_incremental_rebuild_cleans_previous_build_owned_dropins(
+        self, project_root: Path, tmp_path: Path
+    ):
+        """Regression: a second materialize over a stale install-root must
+        succeed when the leftover drop-ins are BUILD-owned (recorded in the
+        previous artifact manifest), never for service-repo files."""
+        import json
+
+        project = Project(project_root)
+        manifest = project.load_service_manifest()
+        orch = BuildOrchestrator(project, BuildConfig(dry_run=True))
+        orch.staging = StagingDir(tmp_path, "orin", "release")
+        orch.staging.prepare()
+
+        # First build materializes the drop-ins.
+        first = orch._materialize_ordering(manifest)
+        assert first
+
+        # Simulate the previous successful build's artifact manifest: every
+        # drop-in recorded as BUILD-owned.
+        prev_manifest = {
+            "artifacts": [
+                {
+                    "path": f"rootfs/{d.rel_path}",
+                    "owner_service": "build",
+                    "install_component": "build-ordering",
+                }
+                for d in first
+            ]
+        }
+        (orch.staging.manifests_dir / "artifact-manifest.json").write_text(
+            json.dumps(prev_manifest), encoding="utf-8"
+        )
+
+        # A non-BUILD-owned file (not recorded in the manifest) must never be
+        # deleted by the clean step. prov declares no ordering, so a drop-in
+        # for it is neither materialized nor recorded.
+        foreign = orch.staging.install_root / dropin_rel_path("tbox-prov.service")
+        foreign.parent.mkdir(parents=True, exist_ok=True)
+        foreign.write_text("[Unit]\nAfter=foreign.service\n", encoding="utf-8")
+
+        # Second (incremental) build: stale BUILD-owned drop-ins are cleaned
+        # and regenerated; the foreign file is left untouched.
+        removed = orch._clean_stale_ordering_dropins()
+        assert removed == len(first)
+        second = orch._materialize_ordering(manifest)
+        assert {r.rel_path for r in second} == {r.rel_path for r in first}
+        # The foreign (non-BUILD-owned) file was not touched by the clean step
+        # and still blocks any attempt to overwrite it.
+        assert foreign.read_text() == "[Unit]\nAfter=foreign.service\n"

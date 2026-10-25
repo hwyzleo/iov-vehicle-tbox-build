@@ -811,6 +811,47 @@ class BuildOrchestrator:
 
     # -- BUILD-owned systemd ordering drop-ins (CR-005) ------------------
 
+    def _clean_stale_ordering_dropins(self) -> int:
+        """Remove BUILD-owned ordering drop-ins left in staging by a previous
+        build (CR-005 \u00a75.3).
+
+        On incremental rebuilds the install-root is reused, so drop-ins
+        materialized by an earlier build persist and would trip the
+        \"must not overwrite a service-repository or platform-overlay file\"
+        guard in :func:`materialize_systemd_ordering`. The previous build's
+        artifact manifest records every drop-in it generated as
+        ``owner_service=build`` / ``install_component=build-ordering``;
+        only those exact files are removed. Service-repository and
+        platform-overlay files are never touched.
+        """
+        path = self.staging.manifests_dir / "artifact-manifest.json"
+        if not path.is_file():
+            return 0
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return 0
+        removed = 0
+        for entry in data.get("artifacts", []):
+            if entry.get("owner_service") != "build":
+                continue
+            if entry.get("install_component") != "build-ordering":
+                continue
+            rel = entry.get("path", "")
+            if not rel.startswith("rootfs/"):
+                continue
+            rel = rel[len("rootfs/"):]
+            stale = self.staging.install_root / rel
+            if stale.is_file() or stale.is_symlink():
+                stale.unlink()
+                removed += 1
+        if removed:
+            print(
+                f"  Removed {removed} stale BUILD-owned ordering drop-in(s) "
+                f"from previous build"
+            )
+        return removed
+
     def _materialize_ordering(
         self, service_manifest: ServiceManifest
     ) -> list[OrderingDropIn]:
@@ -822,6 +863,7 @@ class BuildOrchestrator:
         manifest is generated (so every drop-in is recorded).
         """
         print("\n=== Materializing BUILD-owned systemd ordering drop-ins ===")
+        self._clean_stale_ordering_dropins()
         self._ordering_dropins = materialize_systemd_ordering(
             self.staging.install_root, service_manifest
         )
