@@ -41,8 +41,107 @@ class VerifyResult:
 class Verifier:
     """Verifies packages and staging output."""
 
+    #: On-target systemd unit trees that the payload may populate (service
+    #: repositories install units via their own install rules).
+    _UNIT_PAYLOAD_DIRS = (
+        "usr/lib/systemd/system",
+        "lib/systemd/system",
+        "etc/systemd/system",
+    )
+
     def __init__(self, staging: StagingDir):
         self.staging = staging
+
+    # -- declared-unit presence gate (CR-006 §3.3) -----------------------
+
+    def _load_service_manifest(self):
+        """Load the service manifest; None when this staging has no project."""
+        try:
+            from .manifest import load_service_manifest
+            return load_service_manifest(
+                self.staging.project_root / "manifests" / "services.yaml"
+            )
+        except Exception:
+            return None
+
+    @staticmethod
+    def _owner_services_from_manifest(manifest: dict[str, Any] | None) -> set[str]:
+        """Service ids that actually produced artifacts in this build."""
+        if not manifest:
+            return set()
+        return {
+            str(a.get("owner_service", ""))
+            for a in manifest.get("artifacts", [])
+            if a.get("owner_service")
+        }
+
+    @staticmethod
+    def _payload_unit_names(install_root: Path) -> set[str]:
+        """Unit file basenames present in the staged payload."""
+        names: set[str] = set()
+        for rel in Verifier._UNIT_PAYLOAD_DIRS:
+            d = install_root / rel
+            if d.is_dir():
+                names.update(p.name for p in d.glob("*.service"))
+        return names
+
+    def _missing_declared_units(
+        self, payload_units: set[str], owner_services: set[str]
+    ) -> tuple[list[tuple[str, str]], str | None]:
+        """Declared ``runtime.systemd_units`` missing from the payload.
+
+        Returns ``(missing, skip_reason)``. Only services that actually
+        produced artifacts in this build (``owner_service`` in the artifact
+        manifest) are checked: a unit declared by a service not in the
+        package is not required. When ownership evidence is unavailable the
+        gate reports a skip reason instead of guessing — a name-only
+        registration must never stand in for the real unit file
+        (TBOX-BUILD-DSN-CR-006 §3.3).
+        """
+        sm = self._load_service_manifest()
+        if sm is None:
+            return [], "service manifest unavailable; declared-unit gate skipped"
+        if not owner_services:
+            return [], (
+                "artifact manifest unavailable; declared-unit gate skipped "
+                "(no ownership evidence)"
+            )
+        missing: list[tuple[str, str]] = []
+        for svc in sm:
+            if svc.id not in owner_services:
+                continue
+            if not svc.runtime.systemd_units:
+                continue
+            for unit in svc.runtime.systemd_units:
+                if unit not in payload_units:
+                    missing.append((svc.id, unit))
+        return missing, None
+
+    def _add_declared_unit_check(
+        self, result: VerifyResult, payload_units: set[str], owner_services: set[str]
+    ) -> None:
+        """Report the declared-unit gate into *result* (shared by staging/package)."""
+        missing, skip = self._missing_declared_units(payload_units, owner_services)
+        if skip:
+            result.add_check(
+                "systemd-units-declared", True,
+                f"SKIPPED: {skip}",
+            )
+            return
+        if missing:
+            result.add_check(
+                "systemd-units-declared", False,
+                "declared systemd unit(s) not installed by the locked service "
+                "version: " + "; ".join(
+                    f"{svc} -> {unit}" for svc, unit in missing
+                ) + " (CR-006 §3.3: missing unit is an explicit packaging "
+                "failure; the owning repository must install it)",
+            )
+        else:
+            result.add_check(
+                "systemd-units-declared", True,
+                "All declared systemd units installed by their locked versions",
+            )
 
     def verify_staging(self) -> VerifyResult:
         """Verify the staging directory: ELF check + artifact manifest."""
@@ -126,6 +225,23 @@ class Verifier:
             else "ExecStart target(s) not found in install-root: "
             + "; ".join(f"{unit} -> {path}" for unit, path in missing),
         )
+
+        # 5b. Declared systemd units must be installed by the locked service
+        #     version (CR-006 §3.3): a name-only registration never stands in
+        #     for the real unit file. Ownership comes from the staging
+        #     artifact manifest so only services in this build are required.
+        payload_units = self._payload_unit_names(self.staging.install_root)
+        owner_services: set[str] = set()
+        staging_manifest = self.staging.manifests_dir / "artifact-manifest.json"
+        if staging_manifest.is_file():
+            try:
+                with open(staging_manifest, encoding="utf-8") as f:
+                    owner_services = self._owner_services_from_manifest(
+                        json.load(f)
+                    )
+            except (OSError, json.JSONDecodeError):
+                owner_services = set()
+        self._add_declared_unit_check(result, payload_units, owner_services)
 
         # 6. ELF symbol-integrity gate (CR-004 D4, BUILD-REQ-048)
         #    Verifies that undefined dynamic symbols in every staged ELF are
@@ -262,7 +378,7 @@ class Verifier:
                 if expected != actual else "Checksum matches",
             )
 
-        # 3. Package contains expected directories
+        # 3. Package contains expected directories + declared-unit gate
         import tarfile
         try:
             with tarfile.open(package_path, "r:gz") as tar:
@@ -276,8 +392,35 @@ class Verifier:
                     f"install_root={has_install_root}, manifest={has_manifest}, "
                     f"package_info={has_package_info}",
                 )
+
+                # 4. Declared systemd units present in the package payload
+                #     (CR-006 §3.3) — ownership from the in-package artifact
+                #     manifest, unit names from the tar member list.
+                payload_units = {
+                    Path(m).name
+                    for m in members
+                    if m.endswith(".service")
+                    and any(m.startswith("install-root/" + d)
+                            for d in self._UNIT_PAYLOAD_DIRS)
+                }
+                owner_services: set[str] = set()
+                manifest_member = next(
+                    (m for m in members
+                     if m.endswith("artifact-manifest.json")), None
+                )
+                if manifest_member:
+                    extracted = tar.extractfile(manifest_member)
+                    if extracted is not None:
+                        try:
+                            owner_services = self._owner_services_from_manifest(
+                                json.loads(extracted.read().decode("utf-8"))
+                            )
+                        except (json.JSONDecodeError, UnicodeDecodeError):
+                            owner_services = set()
+                self._add_declared_unit_check(result, payload_units, owner_services)
         except Exception as exc:
             result.add_check("package-structure", False, str(exc))
+            result.add_check("systemd-units-declared", False, str(exc))
 
         if result.status == "pending":
             result.status = "success"

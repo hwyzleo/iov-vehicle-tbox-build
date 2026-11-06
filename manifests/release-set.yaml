@@ -56,6 +56,14 @@ release_sets:
       - sec
       - mqtt
 
+  tbox-time-orin:
+    description: "Framework + TIME Orin release set (TBOX-TIME-DSN-CR-001 + TBOX-SEC-DSN-CR-024 SDK)"
+    platform: orin
+    profile: release
+    services:
+      - framework
+      - time
+
   tbox-tsp-orin:
     description: "Framework + PROV + SEC + MQTT + TSP Orin release set (TBOX-TSP-DSN-CR-007)"
     platform: orin

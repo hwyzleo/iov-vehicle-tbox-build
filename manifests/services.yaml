@@ -109,8 +109,59 @@ services:
       required_devices: []
       capabilities: []
 
+  time:
+    description: "TBOX time service (TBOX-TIME-DSN-CR-001: tbox_time daemon + tbox::time_client SDK; TBOX-SEC-DSN-CR-024 正式 SDK 制品)"
+    kind: service
+    source_dir: ../iov-vehicle-tbox-time
+    build:
+      preset: orin-release
+      targets:
+        - tbox_time
+        - tbox-time-lib
+      service_dependencies:
+        - framework
+      target_dependencies:
+        - nlohmann-json
+      # system-observe 后端经 sd-bus 读 systemd-timesyncd 的 NTP 证据
+      # （TBOX-TIME-DSN-CR-002）。libsystemd 来自 sysroot 受控 dev 增补，
+      # 不走 TARGET 依赖配方。强制要求可用：缺 sd-bus 时宁可 configure 失败，
+      # 也不接受「构建全绿但 SystemObserverSource 恒 Unsupported」的 daemon。
+      cmake_cache_variables:
+        TBOX_TIME_REQUIRE_SDBUS: "ON"
+      install_components:
+        - name: time-sdk
+          staging: sdk
+        - name: time-runtime
+          staging: rootfs
+    runtime:
+      systemd_units:
+        # unit 契约名（沿用 tbox-prov/sec/mqtt 命名惯例，TBOX-BUILD-DSN-CR-006 §3）。
+        # unit 文件由 TIME 仓库配套交付（install COMPONENT time-runtime ->
+        # lib/systemd/system）；BUILD 打包校验强制锁定版本实际安装该 unit，
+        # 缺失即明确失败，不以仅登记名称代替实际文件（CR-006 §3.3）。
+        - tbox-time.service
+      # TIME 只依赖 framework library（无 unit），自身无启动顺序约束登记；
+      # 禁止引用不存在的 tbox-framework.service，也禁止 after MQTT/TSP/SEC unit
+      # （授时引导回边，validator 断言拒绝，CR-006 §3.1/§3.2）。
+      after: []
+      config_paths:
+        - /etc/tbox/common.yaml
+        # 正式契约路径（与 conf.d/*.yaml 部署策略一致）：TIME 当前代码盘点结果
+        # 读 /etc/tbox/time.yaml（临时开发路径），正式接入由 TIME 配套适配
+        # conf.d 默认模板安装与 loader（跨仓缺口登记，不以 BUILD overlay 固化例外）。
+        - /etc/tbox/conf.d/time.yaml
+      config_validation:
+        target_path: /etc/tbox/conf.d/time.yaml
+        # production 模板（config/time.yaml 为 test/mock 冒烟配置，不作正式默认）
+        default_source: config/time.example.yaml
+      # TBOX-TIME-DSN-CR-002：TIME 转为系统时钟观测方，只读 adjtimex + sd-bus，
+      # 不再写系统时钟（timesyncd 是合法写入方），故不授予任何能力。
+      capabilities: []
+      persistent_paths: []
+      required_devices: []
+
   sec:
-    description: "TBOX security service (CR-012: tbox_sec daemon + tbox::sec_client SDK)"
+    description: "TBOX security service (CR-012: tbox_sec daemon + tbox::sec_client SDK; CR-024: TIME client 依赖 + 只读可信时间 IPC/SDK)"
     kind: service
     source_dir: ../iov-vehicle-tbox-sec
     build:
@@ -122,6 +173,7 @@ services:
       service_dependencies:
         - framework
         - prov
+        - time
       # curl: SEC 直接 TARGET 依赖（cloud_client 证书注入/CSR 提交；OpenSSL 来自 sysroot）
       target_dependencies:
         - curl
@@ -135,8 +187,12 @@ services:
         - tbox-sec.service
       # SEC 启动时经 framework-ipc 连接 tbox-prov.sock（IpcProvService::initialize），
       # PROV 未就绪则 initialize 失败，故登记真实启动顺序依赖。
+      # TBOX-SEC-DSN-CR-024：SEC 消费 tbox::time_client（只读可信时间 IPC），
+      # TIME 未运行不阻塞 SEC 非时间能力（不生成 Requires）；以 After= 表达真实
+      # 启动偏序（CR-006 §3.2：保留 PROV 并增加 TIME 实际 unit，不用 waiver 掩盖）。
       after:
         - tbox-prov.service
+        - tbox-time.service
       health_check: tests/smoke/sec-health.sh
       smoke_test: tests/smoke/sec-security.sh
       config_paths:
@@ -166,10 +222,18 @@ services:
         - tbox_diag_client
       # DIAG 启动时经 framework-ipc 连接 PROV 与 SEC，且链接 tbox::prov_client /
       # tbox::sec_client（冻结 release-set SDK）；framework 是 library（无 unit）。
+      # time: 仅构建期依赖。diag/CMakeLists.txt:53 用
+      # add_subdirectory(../iov-vehicle-tbox-sec) 在自己的构建树里编译 SEC，
+      # 因此 SEC 的 find_package(TboxTimeClient CONFIG REQUIRED)（SEC
+      # CMakeLists.txt:60）必须在 diag configure 阶段就能解析，需要 sdk/time
+      # 进入 diag 的 CMAKE_PREFIX_PATH。DIAG 运行期不与 TIME 通信，故以
+      # after_waiver 如实表达（根因是 diag 的跨仓 add_subdirectory 违反
+      # 「禁止 add_subdirectory」约定，待 diag 侧改为 find_package 后移除本条）。
       service_dependencies:
         - framework
         - prov
         - sec
+        - time
       target_dependencies:
         - nlohmann-json
       install_components:
@@ -185,6 +249,17 @@ services:
       after:
         - tbox-prov.service
         - tbox-sec.service
+      # time 是构建期依赖（见上方 service_dependencies 注释）：DIAG 运行期
+      # 不连接 TIME，不生成 After=tbox-time.service，以免引入虚假启动偏序。
+      after_waivers:
+        - dependency: time
+          unit: tbox-time.service
+          owner: diag
+          reason: >-
+            Build-time only dependency: diag compiles SEC in its own build tree
+            via add_subdirectory (diag/CMakeLists.txt:53), so SEC's
+            find_package(TboxTimeClient) must resolve at diag configure time.
+            DIAG performs no runtime IPC to TIME.
       health_check: tests/smoke/diag-health.sh
       smoke_test: tests/smoke/diag-ipc.sh
       config_paths:

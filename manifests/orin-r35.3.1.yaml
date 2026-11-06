@@ -32,6 +32,28 @@ dev_additions:
       - "usr/include/boost/** (14012 headers)"
       - "usr/lib/aarch64-linux-gnu + lib/aarch64-linux-gnu: libboost_{date_time,filesystem,iostreams,locale,thread}.so -> .so.1.71.0 软链"
       - "libboost_system.so.1.71.0 (5688B, header-only stub) + .so 软链（满足 CMake 3.16 FindBoost 的 system 组件）"
+  libsystemd:
+    version: "245 (运行时 libsystemd.so.0.28.0，设备包 libsystemd0 245.4-4ubuntu3.19)"
+    source: "Ubuntu 20.04 focal libsystemd-dev 245.4-4ubuntu3.24 arm64（ports.ubuntu.com；3.19 点版本已被归档淘汰，同一上游 245.4，sd-bus API 稳定）"
+    reason: >-
+      设备快照仅有 libsystemd 运行时 .so.0，缺 dev 头/.pc/.so 软链；
+      TIME 的 system-observe 后端（TBOX-TIME-DSN-CR-002）需经 sd-bus 读
+      systemd-timesyncd 的 NTP 证据。缺 dev 件时 TIME 构建仍"成功"但观测路径
+      被编译掉，产出恒 Unsupported 的 daemon，故按 Boost 同样的方案A补入。
+    added:
+      - "usr/include/systemd/*.h (12 headers: sd-bus.h / sd-bus-protocol.h / sd-bus-vtable.h / _sd-common.h / sd-daemon.h / sd-device.h / sd-event.h / sd-hwdb.h / sd-id128.h / sd-journal.h / sd-login.h / sd-messages.h)"
+      - "usr/lib/aarch64-linux-gnu/pkgconfig/libsystemd.pc"
+      - "usr/lib/aarch64-linux-gnu + lib/aarch64-linux-gnu: libsystemd.so -> libsystemd.so.0.28.0 软链（相对链接，链接期解析 -lsystemd）"
+    abi_verification: >-
+      TIME 实际使用的 10 个 sd_bus 符号（open_system / call_method / get_property /
+      set_method_call_timeout / message_read / message_enter_container /
+      message_exit_container / message_unref / error_free / flush_close_unref）
+      已用 nm -D 在快照自带的 libsystemd.so.0.28.0 中逐一确认存在，
+      未引入对 3.24 新增符号的依赖；运行时仍用设备自带库。
+    note: >-
+      仅链接期需要；运行期设备自带 libsystemd.so.0。pkg-config 在本交叉环境
+      对 sysroot 库不可用（PKG_CONFIG_SYSROOT_DIR 指向 TARGET 依赖 staging），
+      TIME 侧改为 find_path/find_library 兜底解析，.pc 仅为 HOST 构建保留。
 fixes_applied:
   absolute_symlinks_rewritten: 0
   pkgconfig_prefixes_fixed: 0

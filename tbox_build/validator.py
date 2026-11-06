@@ -418,6 +418,72 @@ def validate_systemd_references(manifest: ServiceManifest) -> list[str]:
     return warnings
 
 
+def validate_time_ordering_contract(manifest: ServiceManifest) -> list[str]:
+    """CR-006 regression: TIME bootstrap-ordering contract (BUILD-REQ-054).
+
+    Applies only to the TIME integration (service id ``time``), on top of the
+    generic after/waiver/cycle checks in :func:`validate_systemd_references`:
+
+    * a service depending on ``time`` must express ordering through
+      ``runtime.after`` (a waiver would hide a missed ordering edge —
+      CR-006 §3.2 / BUILD-REQ-054 explicitly forbid that for SEC);
+    * ``time`` itself must not order after MQTT/TSP/SEC units: TIME's time
+      bootstrap must never wait on (or feed back into) the security or
+      cloud path (CR-006 §3.1/§3.2).
+
+    Unknown units / ordering cycles / dependency completeness remain covered
+    by the generic validator. Returns non-fatal diagnostics; raises
+    :class:`ValidationFailure` on violations.
+    """
+    errors: list[str] = []
+    if "time" not in manifest:
+        return errors
+
+    unit_owner: dict[str, str] = {}
+    for svc in manifest:
+        for unit in svc.runtime.systemd_units:
+            unit_owner[unit] = svc.id
+
+    time_svc = manifest.get("time")
+    time_units = set(time_svc.runtime.systemd_units)
+
+    # 1. TIME must not order after MQTT/TSP/SEC units (bootstrap back-edges).
+    for unit in time_svc.runtime.after:
+        owning = unit_owner.get(unit)
+        if owning in {"sec", "mqtt", "tsp"}:
+            errors.append(
+                f"Service 'time' must not order after '{unit}' (owned by "
+                f"'{owning}'): TIME 授时引导不得回边依赖 SEC/MQTT/TSP "
+                "(TBOX-BUILD-DSN-CR-006 §3.1)"
+            )
+
+    # 2. SEC's dependency on time must be satisfied by ordering, not waiver.
+    if "sec" in manifest:
+        sec = manifest.get("sec")
+        if "time" in sec.build.service_dependencies:
+            if any(w.dependency == "time" for w in sec.runtime.after_waivers):
+                errors.append(
+                    "Service 'sec' must not waive ordering for dependency "
+                    "'time' (TBOX-BUILD-DSN-CR-006 §3.2: SEC after 保留 PROV "
+                    "并增加 TIME 实际 unit；waiver 会掩盖漏编排)"
+                )
+            if not (set(sec.runtime.after) & time_units):
+                errors.append(
+                    "Service 'sec' depends on 'time' but its runtime.after "
+                    "does not include the TIME unit "
+                    f"{sorted(time_units)} (BUILD-REQ-054: SEC after 必须包含 "
+                    "TIME 实际 unit)"
+                )
+
+    if errors:
+        raise ValidationFailure(
+            f"TIME ordering contract validation failed "
+            f"({len(errors)} violation(s))",
+            errors,
+        )
+    return []
+
+
 def validate_health_smoke(manifest: ServiceManifest, project_root: Path) -> None:
     """Check that declared health_check / smoke_test scripts exist on disk."""
     violations: list[str] = []
@@ -1103,6 +1169,9 @@ def validate_all(
 
     # 6. systemd unit references + ordering/completeness/waiver contract
     warnings.extend(validate_systemd_references(manifest))
+
+    # 6b. TIME bootstrap-ordering contract (CR-006, BUILD-REQ-054)
+    warnings.extend(validate_time_ordering_contract(manifest))
 
     # 7. health/smoke script existence
     validate_health_smoke(manifest, project_root)

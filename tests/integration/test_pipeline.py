@@ -47,12 +47,15 @@ class TestEndToEndValidation:
         graph = DependencyGraph(service_manifest)
         order = graph.build_order()
         # CR-012: sec 服务加入后共 5 个服务；CR-006: someip 加入后共 8 个；
-        # diag 正式发布链路补齐后共 9 个
-        assert len(order) == 9
+        # diag 正式发布链路补齐后共 9 个；CR-006: time 接入后共 10 个
+        assert len(order) == 10
         assert order.index("tbox-hello-lib") < order.index("tbox-hello-cli")
         assert "framework" in order
         assert "prov" in order
         assert order.index("prov") < order.index("sec")
+        # CR-006: time 拓扑序在 sec 之前（SEC 依赖 time）
+        assert "time" in order
+        assert order.index("time") < order.index("sec")
         # CR-006: someip 依赖 framework/tsp/prov，拓扑序在 tsp 之后
         assert "someip" in order
         assert order.index("tsp") < order.index("someip")
@@ -118,8 +121,8 @@ class TestDryRunBuild:
     def test_dry_run_full_release_set_someip_orin(self, project_root: Path):
         """The full TBOX release set (tbox-someip-orin) builds in dry-run.
 
-        Verifies the complete dependency chain framework -> prov -> sec ->
-        diag/mqtt -> tsp -> someip is ordered correctly and all 7 real
+        Verifies the complete dependency chain framework -> prov -> time ->
+        sec -> diag/mqtt -> tsp -> someip is ordered correctly and all 8 real
         services (excluding the minimal example) are processed.
         """
         project = Project(project_root)
@@ -129,10 +132,11 @@ class TestDryRunBuild:
 
         assert report.status == "success"
         assert report.release_set == "tbox-someip-orin"
-        # 7 real services (no minimal example in this set)
-        assert len(report.service_results) == 7
+        # 8 real services (no minimal example in this set): SEC 消费 TIME，
+        # 经依赖闭包纳入 time（BUILD-REQ-054）。
+        assert len(report.service_results) == 8
         ids = [sr.id for sr in report.service_results]
-        assert ids == ["framework", "prov", "sec", "diag", "mqtt", "tsp", "someip"]
+        assert ids == ["framework", "prov", "time", "sec", "diag", "mqtt", "tsp", "someip"]
         # All services succeeded in dry-run
         for sr in report.service_results:
             assert sr.status == "success"

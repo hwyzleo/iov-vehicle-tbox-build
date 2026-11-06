@@ -21,6 +21,9 @@ repositories:
   prov:
     path: ../iov-vehicle-tbox-prov
     description: "TBOX provisioning service"
+  time:
+    path: ../iov-vehicle-tbox-time
+    description: "TBOX time service (TBOX-TIME-DSN-CR-001)"
   sec:
     path: ../iov-vehicle-tbox-sec
     description: "TBOX security service"
